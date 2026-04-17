@@ -14,12 +14,41 @@ import {
   Scissors,
   Captions,
   Mic,
+  ChevronDown,
+  Languages,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/Badge'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import { posterUrl, useUploadPoster } from '../api/useLibrary'
+
+const PIPELINE_STEPS = [
+  { id: 'chapters',   label: 'Capítulos',   Icon: Scissors,  desc: 'Detectar y trocear capítulos' },
+  { id: 'subtitles',  label: 'Subtítulos',  Icon: Captions,  desc: 'Transcripción EN con WhisperX' },
+  { id: 'translate',  label: 'Traducción',  Icon: Languages, desc: 'Traducir subtítulos EN → ES' },
+  { id: 'dubbing',    label: 'Doblaje',     Icon: Mic,       desc: 'Síntesis de voz ES con XTTS' },
+]
+
+const STEPS_KEY = 'process_all_steps_v1'
+
+function loadSteps() {
+  try {
+    const raw = localStorage.getItem(STEPS_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed
+    }
+  } catch { /* noop */ }
+  return ['chapters', 'subtitles', 'translate', 'dubbing']
+}
 
 function StatusPill({ ok, label, Icon }) {
   return (
@@ -47,7 +76,26 @@ export default function InstructionalHero({
   const nav = useNavigate()
   const [cacheBust, setCacheBust] = useState(0)
   const [posterErrored, setPosterErrored] = useState(false)
+  const [selectedSteps, setSelectedSteps] = useState(loadSteps)
   const fileInputRef = useRef(null)
+
+  const toggleStep = (id) => {
+    setSelectedSteps((prev) => {
+      const next = prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
+      try { localStorage.setItem(STEPS_KEY, JSON.stringify(next)) } catch { /* noop */ }
+      return next
+    })
+  }
+
+  const handleProcessAll = () => {
+    if (selectedSteps.length === 0) {
+      toast.error('Selecciona al menos un paso')
+      return
+    }
+    // Preserve pipeline order
+    const ordered = PIPELINE_STEPS.map((s) => s.id).filter((id) => selectedSteps.includes(id))
+    onProcessAll(ordered)
+  }
 
   const name = instructional?.name || ''
   const author =
@@ -179,12 +227,67 @@ export default function InstructionalHero({
           </div>
 
           <div className="mt-6 flex flex-wrap gap-2">
-            <Button onClick={onProcessAll} disabled={processingAll}>
-              {processingAll
-                ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                : <Play className="mr-2 h-4 w-4" />}
-              {processingAll ? 'Iniciando…' : 'Procesar todo'}
-            </Button>
+            {/* Split button: main action + step selector */}
+            <div className="flex items-stretch">
+              <Button
+                onClick={handleProcessAll}
+                disabled={processingAll || selectedSteps.length === 0}
+                className="rounded-r-none border-r border-r-primary-foreground/20"
+              >
+                {processingAll
+                  ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  : <Play className="mr-2 h-4 w-4" />}
+                {processingAll ? 'Iniciando…' : 'Procesar'}
+                {!processingAll && selectedSteps.length < PIPELINE_STEPS.length && (
+                  <span className="ml-1.5 rounded-full bg-primary-foreground/20 px-1.5 py-0.5 text-[10px] font-semibold">
+                    {selectedSteps.length}
+                  </span>
+                )}
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    disabled={processingAll}
+                    className="rounded-l-none px-2"
+                    aria-label="Elegir pasos del pipeline"
+                  >
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-64 p-1" onCloseAutoFocus={(e) => e.preventDefault()}>
+                  <DropdownMenuLabel className="text-xs uppercase tracking-wide text-muted-foreground">
+                    Pasos del pipeline
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {PIPELINE_STEPS.map(({ id, label, Icon, desc }) => {
+                    const checked = selectedSteps.includes(id)
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); toggleStep(id) }}
+                        className={cn(
+                          'flex w-full items-center gap-3 rounded-sm px-2 py-2 text-left text-sm transition-colors hover:bg-accent',
+                          checked ? 'text-foreground' : 'text-muted-foreground',
+                        )}
+                      >
+                        <div className={cn(
+                          'flex h-5 w-5 shrink-0 items-center justify-center rounded border',
+                          checked ? 'border-primary bg-primary text-primary-foreground' : 'border-border',
+                        )}>
+                          {checked && <span className="text-[10px] font-bold">✓</span>}
+                        </div>
+                        <Icon className="h-4 w-4 shrink-0" />
+                        <div className="min-w-0">
+                          <div className="font-medium">{label}</div>
+                          <div className="truncate text-[11px] text-muted-foreground">{desc}</div>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
             <Button
               variant="outline"
               onClick={() => nav(`/library/${encodeURIComponent(name)}/oracle`)}

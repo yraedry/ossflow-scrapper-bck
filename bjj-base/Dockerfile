@@ -25,7 +25,7 @@ ENV PATH="/opt/venv/bin:$PATH" VIRTUAL_ENV=/opt/venv
 # Deps comunes pesadas — una sola vez para los 3 backends
 # Usamos --extra-index-url con variante cu124 — evita que torch traiga sus
 # propias copias de las libs CUDA ya presentes en el base image.
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/pip,id=bjj-pip,sharing=locked \
     pip install --upgrade pip setuptools wheel \
  && pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
         torch torchaudio \

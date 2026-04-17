@@ -64,17 +64,63 @@ export default function InstructionalDetailPage() {
   const startPipeline = useStartPipeline()
   const [starting, setStarting] = useState(false)
 
-  const goProcessAll = async () => {
+  const goProcessAll = async (steps) => {
     if (!data?.path) return
     setStarting(true)
     try {
-      const resp = await startPipeline.mutateAsync({
-        path: data.path,
-        steps: ['chapters', 'subtitles', 'dubbing'],
-        options: {},
-      })
-      const id = resp?.pipeline_id || resp?.id
-      if (id) nav(`/pipelines/${id}`)
+      const videos = data?.videos || []
+      const seasonMap = new Map()
+      for (const v of videos) {
+        const key = v.season || 'Sin temporada'
+        if (!seasonMap.has(key)) seasonMap.set(key, [])
+        seasonMap.get(key).push(v)
+      }
+
+      const seasonPaths = []
+      for (const [, list] of [...seasonMap.entries()].sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true }))) {
+        const first = list[0]?.path
+        if (!first) continue
+        const sep = first.includes('\\') ? '\\' : '/'
+        const idx = first.lastIndexOf(sep)
+        if (idx > 0) seasonPaths.push(first.slice(0, idx))
+      }
+
+      const paths = seasonPaths.length > 0 ? seasonPaths : [data.path]
+
+      // Lanza pipelines en secuencia — espera completed/failed antes del siguiente
+      // para evitar que WhisperX cargue en GPU múltiples veces simultáneamente.
+      const waitForPipeline = async (id) => {
+        const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
+        while (true) {
+          await new Promise((r) => setTimeout(r, 4000))
+          try {
+            const p = await fetch(`/api/pipeline/${id}`).then((r) => r.json())
+            if (TERMINAL.has(p.status)) return p.status
+          } catch { /* sigue esperando */ }
+        }
+      }
+
+      let lastId = null
+      for (let i = 0; i < paths.length; i++) {
+        const resp = await startPipeline.mutateAsync({
+          path: paths[i],
+          steps,
+          options: { mode: 'oracle' },
+        })
+        const id = resp?.pipeline_id || resp?.id
+        if (!id) { toast.error('No se recibió pipeline_id'); break }
+        lastId = id
+        toast.info(`Season ${i + 1}/${paths.length} lanzada`)
+        if (i < paths.length - 1) {
+          const status = await waitForPipeline(id)
+          if (status === 'failed' || status === 'cancelled') {
+            toast.error(`Season ${i + 1} falló (${status}), deteniendo`)
+            break
+          }
+        }
+      }
+
+      if (lastId) nav(`/pipelines/${lastId}`)
       else toast.error('No se recibió pipeline_id del servidor')
     } catch (err) {
       toast.error(`Error iniciando pipeline: ${err.message || 'desconocido'}`)

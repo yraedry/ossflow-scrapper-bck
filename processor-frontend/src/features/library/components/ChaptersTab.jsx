@@ -35,7 +35,7 @@ import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/Badge'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
-import { useRenameChapter, useBurnSubs, useBurnSubsVideo } from '../api/useLibrary'
+import { useRenameChapter, useBurnSubs, useBurnSubsVideo, useRenameByOracle } from '../api/useLibrary'
 import { useTranslateSrt } from '../api/useSubtitles'
 import { useStartPipeline } from '@/features/pipeline/api/usePipeline'
 import { useOracleData } from '@/features/oracle/api/useOracle'
@@ -544,6 +544,41 @@ function SeasonPipelineButton({ seasonPath, steps, label, Icon, title, hasOracle
   )
 }
 
+function SeasonRenameOracleButton({ seasonPath, oracle, instructionalName }) {
+  const rename = useRenameByOracle()
+  const onClick = async (e) => {
+    e.stopPropagation()
+    if (!seasonPath) {
+      toast.error('No se pudo inferir la ruta de la Season')
+      return
+    }
+    try {
+      const result = await rename.mutateAsync({ seasonPath, oracle, instructionalName })
+      const n = result?.renamed?.length ?? 0
+      const sk = result?.skipped?.length ?? 0
+      toast.success(`Renombrados ${n} capítulo(s)${sk ? ` · ${sk} sin coincidencia` : ''}`)
+    } catch (err) {
+      toast.error(`Renombrado falló: ${err?.message || 'desconocido'}`)
+    }
+  }
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={rename.isPending || !seasonPath}
+      onClick={onClick}
+      title="Renombrar capítulos usando los títulos del oráculo"
+    >
+      {rename.isPending ? (
+        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+      ) : (
+        <Pencil className="mr-1 h-3 w-3" />
+      )}
+      Renombrar por Oracle
+    </Button>
+  )
+}
+
 function SeasonBurnButton({ seasonPath }) {
   const burn = useBurnSubs()
   const onClick = async (e) => {
@@ -613,7 +648,9 @@ export default function ChaptersTab({ instructional }) {
       defaultValue={seasons.map(([s]) => String(s))}
       className="space-y-2"
     >
-      {seasons.map(([season, list]) => (
+      {seasons.map(([season, list]) => {
+        const seasonPath = deriveSeasonPath(list)
+        return (
         <AccordionItem
           key={season}
           value={String(season)}
@@ -631,7 +668,7 @@ export default function ChaptersTab({ instructional }) {
               >
                 {season === 'Sin temporada' ? (
                   <SeasonPipelineButton
-                    seasonPath={deriveSeasonPath(list)}
+                    seasonPath={seasonPath}
                     steps={['chapters']}
                     label={hasOracle ? 'Trocear (oráculo)' : 'Trocear'}
                     Icon={Scissors}
@@ -640,28 +677,35 @@ export default function ChaptersTab({ instructional }) {
                   />
                 ) : (
                   <>
+                    {hasOracle && (
+                      <SeasonRenameOracleButton
+                        seasonPath={seasonPath}
+                        oracle={oracleData}
+                        instructionalName={name}
+                      />
+                    )}
                     <SeasonPipelineButton
-                      seasonPath={deriveSeasonPath(list)}
+                      seasonPath={seasonPath}
                       steps={['subtitles']}
                       label="Subs EN"
                       Icon={Captions}
                       title="Generar subtítulos EN en toda la Season"
                     />
                     <SeasonPipelineButton
-                      seasonPath={deriveSeasonPath(list)}
+                      seasonPath={seasonPath}
                       steps={['translate']}
                       label="Subs ES"
                       Icon={Captions}
                       title="Traducir subtítulos EN → ES en toda la Season (requiere subs EN previos)"
                     />
                     <SeasonPipelineButton
-                      seasonPath={deriveSeasonPath(list)}
+                      seasonPath={seasonPath}
                       steps={['dubbing']}
                       label="Doblar"
                       Icon={Mic}
                       title="Doblar todos los capítulos de la Season"
                     />
-                    <SeasonBurnButton seasonPath={deriveSeasonPath(list)} />
+                    <SeasonBurnButton seasonPath={seasonPath} />
                   </>
                 )}
               </div>
@@ -693,7 +737,8 @@ export default function ChaptersTab({ instructional }) {
             </div>
           </AccordionContent>
         </AccordionItem>
-      ))}
+        )
+      })}
     </Accordion>
   )
 }

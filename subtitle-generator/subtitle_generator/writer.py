@@ -108,11 +108,11 @@ class SubtitleWriter:
         line1 = " ".join(words[:best_break])
         line2 = " ".join(words[best_break:])
 
-        # If either line still exceeds limit, truncate gracefully
+        # If either line still exceeds limit, truncate at last complete word
         if len(line1) > max_chars:
-            line1 = line1[:max_chars]
+            line1 = line1[:max_chars].rsplit(" ", 1)[0]
         if len(line2) > max_chars:
-            line2 = line2[:max_chars]
+            line2 = line2[:max_chars].rsplit(" ", 1)[0]
 
         return f"{line1}\n{line2}"
 

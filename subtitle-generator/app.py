@@ -304,6 +304,18 @@ def clear_hf_locks() -> dict:
     return _clear_hf_locks()
 
 
+@app.post("/maintenance/restart")
+def restart_service() -> dict:
+    """Graceful self-restart: libera VRAM y reinicia el proceso.
+
+    Docker reinicia el contenedor automáticamente (restart: unless-stopped).
+    Útil para liberar VRAM tras un OOM o cancelación de job.
+    """
+    import threading, os, signal
+    threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+    return {"ok": True, "message": "Reiniciando subtitle-generator…"}
+
+
 @app.post("/validate")
 def validate(req: ValidateRequest) -> dict:
     from pathlib import Path as _P

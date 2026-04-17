@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Loader2, RefreshCw, LayoutGrid, List } from 'lucide-react'
+import { Loader2, RefreshCw, LayoutGrid, List, Users } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -7,11 +7,12 @@ import { useScanLibrary } from '../api/useLibrary'
 import { useSettings } from '@/features/settings/api/useSettings'
 
 const VIEW_KEY = 'library_view_v3'
+const VALID_VIEWS = ['grid', 'list', 'author']
 
 function loadView() {
   try {
     const v = localStorage.getItem(VIEW_KEY)
-    return v === 'list' ? 'list' : 'grid'
+    return VALID_VIEWS.includes(v) ? v : 'grid'
   } catch {
     return 'grid'
   }
@@ -96,6 +97,20 @@ export function LibraryToolbar({ count = 0, view, onViewChange }) {
             )}
           >
             <List className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            aria-pressed={effectiveView === 'author'}
+            aria-label="Agrupar por autor"
+            onClick={() => setView('author')}
+            className={cn(
+              'inline-flex h-8 w-8 items-center justify-center rounded-sm transition-colors',
+              effectiveView === 'author'
+                ? 'bg-primary text-primary-foreground'
+                : 'text-muted-foreground hover:bg-accent',
+            )}
+          >
+            <Users className="h-4 w-4" />
           </button>
         </div>
 

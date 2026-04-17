@@ -297,7 +297,10 @@ def _client_and_payload(
                     "oracle": oracle_data,
                     "output_dir": out_dir,
                 }, True
-            log.warning("Oracle mode requested but no oracle found for %s, falling back to signal", path)
+            raise ValueError(
+                f"Oracle mode requested but no oracle data found for '{path}'. "
+                "Run Oracle first from the instructional detail page."
+            )
 
         return splitter_client(), {
             **base,

@@ -13,6 +13,34 @@ import { toast } from 'sonner'
 
 // TODO: virtualize via @tanstack/react-virtual if list > 200 items.
 
+// Mirror the backend heuristic: "Title - Author" → extract author from name when field is empty.
+function resolveAuthor(item) {
+  if (item?.author) return item.author
+  const name = item?.name || ''
+  if (name.includes(' - ')) {
+    const parts = name.split(' - ')
+    const left = parts[0].trim()
+    const right = parts[parts.length - 1].trim()
+    const leftWords = left.split(' ').length
+    const rightWords = right.split(' ').length
+    if (leftWords <= 3 && rightWords > leftWords) return left
+    return right
+  }
+  return ''
+}
+
+function groupByAuthor(items) {
+  const map = new Map()
+  for (const item of items) {
+    const author = resolveAuthor(item) || 'Sin autor'
+    if (!map.has(author)) map.set(author, [])
+    map.get(author).push(item)
+  }
+  return Array.from(map.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([author, list]) => ({ author, list }))
+}
+
 function isProcessed(item) {
   return (
     (item?.chapters_detected ?? 0) > 0 ||
@@ -39,7 +67,7 @@ function matchesQuery(item, q) {
   const needle = q.toLowerCase()
   return (
     (item?.name || '').toLowerCase().includes(needle) ||
-    (item?.author || '').toLowerCase().includes(needle)
+    resolveAuthor(item).toLowerCase().includes(needle)
   )
 }
 
@@ -129,6 +157,8 @@ export default function LibraryPage() {
     )
   }, [data, filter, q, sort])
 
+  const groups = useMemo(() => view === 'author' ? groupByAuthor(items) : [], [items, view])
+
   const handleScan = async () => {
     const path = settings?.library_path
     if (!path) {
@@ -180,6 +210,22 @@ export default function LibraryPage() {
             </li>
           ))}
         </ul>
+      ) : view === 'author' ? (
+        <div className="space-y-8">
+          {groups.map(({ author, list }) => (
+            <div key={author}>
+              <h2 className="mb-3 text-base font-semibold text-foreground/80 border-b border-border/40 pb-1">
+                {author}
+                <span className="ml-2 text-xs font-normal text-muted-foreground">{list.length}</span>
+              </h2>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
+                {list.map((it) => (
+                  <PosterCard key={it.name} instructional={it} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
           {items.map((it) => (

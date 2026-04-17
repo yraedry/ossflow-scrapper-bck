@@ -1,0 +1,41 @@
+# ── Entornos virtuales ──────────────────────────────────────────────────────
+**/.venv/
+**/venv/
+**/.env
+**/.env.*
+
+# ── Python bytecode ─────────────────────────────────────────────────────────
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.egg-info/
+**/*.egg/
+**/.eggs/
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+**/tests/
+**/test/
+**/service_tests/
+**/.pytest_cache/
+**/.coverage
+**/htmlcov/
+
+# ── Frontend (node_modules + dist — el frontend tiene su propio contexto) ────
+processor-frontend/node_modules/
+processor-frontend/dist/
+processor-frontend/.vite/
+
+# ── Git / IDE ────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+**/.DS_Store
+**/*.log
+docs/
+CLAUDE.md
+README.md
+
+# ── Modelos y cachés locales ─────────────────────────────────────────────────
+**/.cache/
+**/models/

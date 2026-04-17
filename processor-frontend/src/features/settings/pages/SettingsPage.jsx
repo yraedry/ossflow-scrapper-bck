@@ -1239,6 +1239,7 @@ function MaintenanceSection() {
   const { data: settings } = useSettings()
   const libraryPath = settings?.library_path || ''
   const [busy, setBusy] = useState(false)
+  const [restarting, setRestarting] = useState(false)
 
   const clearLocks = async () => {
     setBusy(true)
@@ -1257,6 +1258,23 @@ function MaintenanceSection() {
     }
   }
 
+  const restartSubtitles = async () => {
+    setRestarting(true)
+    try {
+      await http.post('/subtitles/maintenance/restart', {})
+      toast.success('Subtitle Generator reiniciando…', {
+        description: 'Volverá a estar disponible en ~15 segundos.',
+      })
+    } catch (e) {
+      // El servicio se cae antes de responder — es esperado
+      toast.success('Subtitle Generator reiniciando…', {
+        description: 'Volverá a estar disponible en ~15 segundos.',
+      })
+    } finally {
+      setTimeout(() => setRestarting(false), 15000)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <Card>
@@ -1270,6 +1288,19 @@ function MaintenanceSection() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="flex items-start justify-between gap-4 rounded-md border border-border/60 p-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Liberar VRAM (reiniciar Subtitle Generator)</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Reinicia el servicio de subtítulos para liberar la VRAM tras un OOM o cancelación de job.
+                El contenedor vuelve solo en ~15 segundos.
+              </p>
+            </div>
+            <Button onClick={restartSubtitles} disabled={restarting} variant="outline" size="sm" className="shrink-0">
+              {restarting ? <Loader2 className="mr-2 animate-spin" size={14} /> : <RefreshCw className="mr-2" size={14} />}
+              {restarting ? 'Reiniciando…' : 'Reiniciar'}
+            </Button>
+          </div>
           <div className="flex items-start justify-between gap-4 rounded-md border border-border/60 p-4">
             <div className="min-w-0">
               <p className="text-sm font-medium">Limpiar locks de HuggingFace</p>

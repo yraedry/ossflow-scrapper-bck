@@ -88,6 +88,127 @@ def _find_sibling(stem_path: Path, suffix: str) -> Path | None:
     return candidate if candidate.exists() else None
 
 
+@router.post("/rename-by-oracle")
+async def rename_season_by_oracle(request: Request) -> Any:
+    """Rename all chapters in a Season folder using oracle chapter titles.
+
+    Matches each file's SNNeMM episode code to the oracle's (volume, episode)
+    and replaces the title portion.  Files with no oracle match are skipped.
+
+    Body: {"season_path": "...", "oracle": {<OracleResult>}}.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid JSON body")
+
+    season_path_str = body.get("season_path")
+    oracle = body.get("oracle")
+
+    if not isinstance(season_path_str, str) or not season_path_str:
+        raise HTTPException(status_code=422, detail="season_path is required")
+    if not isinstance(oracle, dict):
+        raise HTTPException(status_code=422, detail="oracle is required")
+
+    library_root_str = get_library_path()
+    if not library_root_str:
+        raise HTTPException(status_code=400, detail="library_path not configured")
+    library_root = Path(library_root_str)
+
+    from api.paths import to_container_path
+    container_path_str = to_container_path(season_path_str, library_root_str)
+    season_dir = Path(container_path_str)
+    resolved_season = _resolve_within_library(season_dir, library_root)
+    if not resolved_season.exists() or not resolved_season.is_dir():
+        raise HTTPException(status_code=404, detail=f"Season directory not found: {container_path_str}")
+
+    # Build a mapping (volume_num, episode_num) → title from oracle volumes.
+    # oracle structure: {"volumes": [{"number": N, "chapters": [{"number": M, "title": "..."}]}]}
+    oracle_map: dict[tuple[int, int], str] = {}
+    for vol in oracle.get("volumes", []):
+        vol_num = int(vol.get("number", 0))
+        for ch in vol.get("chapters", []):
+            ep_num = int(ch.get("number", 0))
+            title = ch.get("title", "").strip()
+            if title:
+                oracle_map[(vol_num, ep_num)] = title
+
+    if not oracle_map:
+        raise HTTPException(status_code=422, detail="Oracle contains no chapter titles")
+
+    VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov"}
+    renamed: list[dict[str, str]] = []
+    skipped: list[str] = []
+
+    # Formato alternativo: "1-2.mp4" → vol=1, ep=2 (archivos sin renombrar del splitter)
+    _RAW_RE = re.compile(r"^(?P<vol>\d+)-(?P<ep>\d+)(?P<ext>\.[^.]+)$")
+    instructional_name = body.get("instructional_name", "").strip()
+
+    for f in sorted(resolved_season.iterdir()):
+        if not f.is_file() or f.suffix.lower() not in VIDEO_EXTS:
+            continue
+
+        m = _SNNEMM_RE.match(f.name)
+        if m:
+            season_num = int(m.group("season"))
+            ep_num = int(m.group("ep"))
+            prefix = m.group("prefix").strip()
+            season_str = m.group("season")
+            ep_str = m.group("ep")
+            ext = m.group("ext")
+        else:
+            m2 = _RAW_RE.match(f.name)
+            if not m2:
+                skipped.append(f.name)
+                continue
+            season_num = int(m2.group("vol"))
+            ep_num = int(m2.group("ep"))
+            prefix = instructional_name
+            season_str = f"{season_num:02d}"
+            ep_str = f"{ep_num:02d}"
+            ext = m2.group("ext")
+
+        oracle_title = oracle_map.get((season_num, ep_num))
+        if oracle_title is None:
+            skipped.append(f.name)
+            continue
+
+        sanitized = _sanitize_title(oracle_title)
+        if not sanitized:
+            skipped.append(f.name)
+            continue
+
+        sep = f" - " if prefix else ""
+        new_filename = f"{prefix}{sep}S{season_str}E{ep_str} - {sanitized}{ext}"
+        new_path = f.with_name(new_filename)
+
+        if new_path == f:
+            continue
+        if new_path.exists():
+            log.warning("rename-by-oracle: target exists, skipping: %s", new_path.name)
+            skipped.append(f.name)
+            continue
+
+        _resolve_within_library(new_path, library_root)
+        old_stem = f.stem
+        new_stem = new_path.stem
+
+        os.rename(f, new_path)
+        renamed.append({"from": str(f), "to": str(new_path)})
+
+        for suffix in _SIDECAR_SUFFIXES:
+            sib_old = f.with_name(old_stem + suffix)
+            if not sib_old.exists():
+                continue
+            sib_new = f.with_name(new_stem + suffix)
+            if sib_new == sib_old or sib_new.exists():
+                continue
+            os.rename(sib_old, sib_new)
+            renamed.append({"from": str(sib_old), "to": str(sib_new)})
+
+    return JSONResponse({"renamed": renamed, "skipped": skipped})
+
+
 @router.patch("/rename")
 async def rename_chapter(request: Request) -> Any:
     """Rename a chapter file (and its sidecars) preserving the SNNeMM prefix.
