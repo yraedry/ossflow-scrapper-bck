@@ -127,37 +127,80 @@ class Synthesizer:
         reference_wav: Path,
         speed: float,
     ) -> AudioSegment:
-        """Synthesize one short chunk using Chatterbox."""
+        """Synthesize one short chunk using Chatterbox.
+
+        Chatterbox ES tiene un bug conocido: tokens comunes (puntuación,
+        espacios) disparan falsos positivos de repetition detection →
+        forcing EOS → TTS truncado. Detectamos el corte comparando la
+        duración generada contra el mínimo esperado por longitud de texto
+        (~avg_ms_per_char) y reintentamos con temperature más alta.
+        """
         import torchaudio as ta
 
         cfg_weight = self._speed_to_cfg_weight(speed)
 
-        wav = self.model.generate(
-            text=text,
-            language_id=self.cfg.target_language,
-            audio_prompt_path=str(reference_wav),
-            exaggeration=self.cfg.tts_exaggeration,
-            cfg_weight=cfg_weight,
-            temperature=self.cfg.tts_temperature,
-            repetition_penalty=self.cfg.tts_repetition_penalty,
-            min_p=self.cfg.tts_min_p,
-            top_p=self.cfg.tts_top_p,
-        )
+        expected_ms = len(text) * self.cfg.avg_ms_per_char
+        min_acceptable_ms = expected_ms * 0.60
 
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".wav", prefix="tts_", delete=False,
-        )
-        tmp.close()
-        try:
-            # Chatterbox returns a torch tensor [channels, samples]; save via torchaudio
-            ta.save(tmp.name, wav, self.sample_rate)
-            return AudioSegment.from_wav(tmp.name)
-        finally:
-            import os as _os
+        attempts = [
+            (self.cfg.tts_temperature, self.cfg.tts_repetition_penalty),
+            (min(self.cfg.tts_temperature + 0.15, 1.0), self.cfg.tts_repetition_penalty + 0.10),
+            (min(self.cfg.tts_temperature + 0.30, 1.1), self.cfg.tts_repetition_penalty + 0.20),
+        ]
+
+        best_segment: AudioSegment | None = None
+        best_ms = 0
+
+        for attempt_idx, (temp, rep_pen) in enumerate(attempts):
+            wav = self.model.generate(
+                text=text,
+                language_id=self.cfg.target_language,
+                audio_prompt_path=str(reference_wav),
+                exaggeration=self.cfg.tts_exaggeration,
+                cfg_weight=cfg_weight,
+                temperature=temp,
+                repetition_penalty=rep_pen,
+                min_p=self.cfg.tts_min_p,
+                top_p=self.cfg.tts_top_p,
+            )
+
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".wav", prefix="tts_", delete=False,
+            )
+            tmp.close()
             try:
-                _os.remove(tmp.name)
-            except OSError:
-                pass
+                ta.save(tmp.name, wav, self.sample_rate)
+                segment = AudioSegment.from_wav(tmp.name)
+            finally:
+                import os as _os
+                try:
+                    _os.remove(tmp.name)
+                except OSError:
+                    pass
+
+            seg_ms = len(segment)
+            if seg_ms > best_ms:
+                best_segment = segment
+                best_ms = seg_ms
+
+            if seg_ms >= min_acceptable_ms:
+                if attempt_idx > 0:
+                    logger.info(
+                        "TTS retry #%d succeeded for %d-char text (%d ms, expected >=%d ms)",
+                        attempt_idx, len(text), seg_ms, int(min_acceptable_ms),
+                    )
+                return segment
+
+            logger.warning(
+                "TTS truncated on attempt #%d (%d ms < %d ms expected for %d chars), retrying…",
+                attempt_idx + 1, seg_ms, int(min_acceptable_ms), len(text),
+            )
+
+        logger.error(
+            "TTS truncated on all %d attempts; using best result (%d ms) for text: %r",
+            len(attempts), best_ms, text[:80],
+        )
+        return best_segment if best_segment is not None else AudioSegment.silent(duration=100)
 
     def _split_long_text(self, text: str, limit: int) -> list[str]:
         """Split text into chunks up to *limit* chars at natural boundaries."""

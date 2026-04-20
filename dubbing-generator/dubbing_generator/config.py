@@ -17,10 +17,13 @@ class DubbingConfig:
     # extender el dub pasado el final del vídeo — se compensa activando
     # allow_video_tail_extension (pad del último frame) en vez de acelerar.
     tts_speed: float = 0.88
-    # temperature 0.65: baja variabilidad melódica → tono consistente entre
-    # frases, evita que Chatterbox "invente" acentos raros al resetear
-    # prosodia por chunk. <0.55 ya suena robótico monótono.
-    tts_temperature: float = 0.65
+    # temperature 0.80: más alta de lo habitual pero necesaria. Chatterbox
+    # tiene bug documentado con ES donde tokens comunes (6405, 6324, 4137,
+    # 1034 = puntuación/espacio) se repiten y disparan EOS prematuro. Subir
+    # temp aumenta variedad del sampler → distintos tokens → menos falsos
+    # positivos de repetition detection. Prosodia sigue coherente porque
+    # cfg_weight (0.45) ya ancla el ritmo al audio de referencia.
+    tts_temperature: float = 0.80
     target_language: str = "es"
     # char_limit 260: menos cortes mid-frase. Cada chunk reinicia prosodia en
     # Chatterbox, y juntar chunks con cross-fade suena robótico. Mejor una
@@ -30,13 +33,17 @@ class DubbingConfig:
     # exaggeration 0.30: coach plano, menos teatral. Baja variación de
     # énfasis entre chunks → menos "acentos raros" percibidos.
     tts_exaggeration: float = 0.30
-    # repetition_penalty 1.25: más fuerte evita que Chatterbox detecte
-    # repetición falsa de tokens y fuerce EOS en mitad de frase (corta
-    # el TTS y deja hueco). 1.15 disparaba "Detected 2x repetition" con
-    # frases normales.
-    tts_repetition_penalty: float = 1.25
-    tts_min_p: float = 0.05
-    tts_top_p: float = 0.95
+    # repetition_penalty 1.35: 1.25 seguía disparando "Detected 2x
+    # repetition" en 15/15 frases con tokens comunes ES (6405, 6324, 4137)
+    # → EOS prematuro → TTS truncado hasta -2400ms → gaps audibles. 1.35
+    # penaliza más fuerte la repetición real y deja pasar los falsos
+    # positivos. Combinado con temperature 0.70 (más variedad).
+    tts_repetition_penalty: float = 1.35
+    # min_p/top_p abiertos: 0.02/1.0 permite al sampler escoger tokens menos
+    # probables cuando los top-k repiten (rompe ciclos de repetición que
+    # disparan EOS prematuro en Chatterbox ES).
+    tts_min_p: float = 0.02
+    tts_top_p: float = 1.0
     # Legacy field (unused with Chatterbox but kept for back-compat)
     tts_model_name: str = "chatterbox-multilingual"
 
