@@ -29,7 +29,7 @@ const SEV_ICON = { error: AlertCircle, warn: AlertTriangle, info: Info, ok: Chec
 
 function srtPathFor(videoPath) {
   const dot = videoPath.lastIndexOf('.')
-  return dot > 0 ? `${videoPath.slice(0, dot)}.srt` : `${videoPath}.srt`
+  return dot > 0 ? `${videoPath.slice(0, dot)}.en.srt` : `${videoPath}.en.srt`
 }
 
 function severityOf(summary) {

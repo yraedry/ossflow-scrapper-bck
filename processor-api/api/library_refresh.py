@@ -53,6 +53,8 @@ def _video_flags(video_path: Path) -> dict[str, Any]:
     folder = video_path.parent
     base = video_path.stem
     has_srt = (folder / f"{base}.en.srt").exists() or (folder / f"{base}.srt").exists()
+    # Literal ES subtitles. The dubbing-adapted file is {base}.dub.es.srt
+    # (different stem), so this check unambiguously matches only the literal.
     has_es_srt = (
         (folder / f"{base}.es.srt").exists()
         or (folder / f"{base}.ES.srt").exists()

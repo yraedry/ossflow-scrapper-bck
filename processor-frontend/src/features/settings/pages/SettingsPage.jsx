@@ -905,14 +905,22 @@ function TranslationSection({ settings }) {
           {provider === 'openai' && (
             <div>
               <Label htmlFor="translation_model">Modelo OpenAI</Label>
-              <Input
-                id="translation_model"
-                placeholder="gpt-4o-mini"
-                {...form.register('translation_model')}
-                className="mt-1.5 font-mono"
-              />
+              <Select
+                value={form.watch('translation_model') || 'gpt-4o-mini'}
+                onValueChange={(v) => form.setValue('translation_model', v, { shouldDirty: true })}
+              >
+                <SelectTrigger id="translation_model" className="mt-1.5 font-mono">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gpt-4o-mini">gpt-4o-mini (económico)</SelectItem>
+                  <SelectItem value="gpt-4o">gpt-4o (mejor calidad, ~10× más caro)</SelectItem>
+                  <SelectItem value="gpt-4.1-mini">gpt-4.1-mini</SelectItem>
+                  <SelectItem value="gpt-4.1">gpt-4.1</SelectItem>
+                </SelectContent>
+              </Select>
               <p className="text-xs text-muted-foreground mt-1">
-                <code>gpt-4o-mini</code> recomendado (~$0.03/Season). <code>gpt-4o</code> ~10× más caro.
+                <code>gpt-4o-mini</code> recomendado (~$0.03/Season). <code>gpt-4o</code> mejor para dubbing fill_budget si ves count mismatch.
               </p>
             </div>
           )}

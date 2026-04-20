@@ -64,6 +64,10 @@ class StepInfo:
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     diff: Optional[dict] = None
+    # Per-step options snapshot (e.g. dubbing_mode=True for translate runs
+    # that generate .dub.es.srt). Lets the UI distinguish "Traducción" from
+    # "Guion doblaje" even though both are the same backend step.
+    options: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -232,6 +236,8 @@ _load_history()
 
 # Valid step names
 VALID_STEPS = {"chapters", "subtitles", "translate", "dubbing"}
+# Canonical order for sorting a user-supplied list.
+STEP_ORDER = ["chapters", "subtitles", "translate", "dubbing"]
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +260,31 @@ def _load_oracle_for_path(host_path: str) -> Optional[dict]:
     except (OSError, ValueError) as exc:
         log.warning("Failed to read oracle from %s: %s", sidecar, exc)
         return None
+
+
+def _load_voice_profile_for_path(host_path: str) -> str:
+    """Walk up from video path looking for .bjj-meta.json with voice_profile.
+
+    Videos live deep inside the tree (Season_NN / chapter files), so the
+    sidecar is typically 1-2 levels up. Empty string means "clone instructor".
+    """
+    p = Path(host_path)
+    current = p if p.is_dir() else p.parent
+    for _ in range(4):  # at most 4 levels up (Season / chapters / file)
+        sidecar = current / SIDECAR_NAME
+        if sidecar.exists():
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    vp = data.get("voice_profile")
+                    if isinstance(vp, str) and vp:
+                        return vp
+            except (OSError, ValueError) as exc:
+                log.warning("Failed to read voice_profile from %s: %s", sidecar, exc)
+        if current.parent == current:
+            break
+        current = current.parent
+    return ""
 
 
 def _client_and_payload(
@@ -337,6 +368,19 @@ def _client_and_payload(
         if options.get("formality"):
             topts["formality"] = options["formality"]
 
+        # Dubbing-adapted track (.dub.es.srt). Explicit option wins; else
+        # pull from global setting. Required so the dubbing step can pick
+        # the speech-anchored SRT (nivel 3) instead of the reading one.
+        if "dubbing_mode" in options:
+            dub_on = bool(options["dubbing_mode"])
+        else:
+            dub_on = bool(get_setting("translation_dubbing_mode"))
+        if dub_on:
+            topts["dubbing_mode"] = True
+            cps = options.get("dubbing_cps") or get_setting("translation_dubbing_cps")
+            if cps:
+                topts["dubbing_cps"] = float(cps)
+
         key = options.get("api_key") or (
             get_setting("openai_api_key") if provider == "openai"
             else get_setting("deepl_api_key") if provider == "deepl"
@@ -358,10 +402,13 @@ def _client_and_payload(
         return subs_client(), {**base, "options": topts}, False
     if step_name == "dubbing":
         opts: dict = {"skip_translation": True}
-        vp = options.get("voice_profile")
+        # Explicit voice_profile in options wins; else fall back to the one
+        # stored in the instructional's sidecar. Empty = clone instructor.
+        vp = options.get("voice_profile") or _load_voice_profile_for_path(path)
         if vp:
             opts["voice_profile"] = vp
-        if options.get("use_model_voice", False):
+            opts["use_model_voice"] = True
+        elif options.get("use_model_voice", False):
             opts["use_model_voice"] = True
         return dubbing_client(), {**base, "options": opts}, False
     raise ValueError(f"Unknown step: {step_name}")

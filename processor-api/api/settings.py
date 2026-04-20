@@ -45,6 +45,11 @@ _DEFAULTS: dict[str, Any] = {
     "translation_provider": "openai",
     "translation_model": "gpt-4o-mini",
     "translation_fallback_provider": "deepl",
+    # Industry-standard iso-synchronous translation: the translator compacts
+    # each ES line to fit the SRT slot so TTS comes out on-time without audio
+    # stretch. Only works with OpenAI provider (budget-aware prompt).
+    "translation_dubbing_mode": True,
+    "translation_dubbing_cps": 16.0,   # chars/sec: 16 fills slots with small overshoot that stretch absorbs (14 left silence)
     "author_aliases": {},
 }
 

@@ -51,6 +51,23 @@ def _install_ring_buffer() -> RingBufferHandler:
     return handler
 
 
+class _HealthAccessFilter(logging.Filter):
+    """Drop uvicorn.access lines for noisy health/metrics endpoints.
+
+    The pipeline UI polls /health every few seconds; without this filter the
+    ring buffer and stdout drown real pipeline logs in access noise.
+    """
+
+    _NOISY_PATHS = (" /health ", " /gpu ", " /logs ")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        return not any(p in msg for p in self._NOISY_PATHS)
+
+
 def _ensure_uvicorn_propagates() -> None:
     # Uvicorn loggers are non-propagating by default; make them feed the root
     # handler so our ring buffer captures request/access/error lines.
@@ -59,6 +76,9 @@ def _ensure_uvicorn_propagates() -> None:
         lg.propagate = True
         if lg.level == logging.NOTSET:
             lg.setLevel(logging.INFO)
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _HealthAccessFilter) for f in access.filters):
+        access.addFilter(_HealthAccessFilter())
 
 
 def _query_gpus() -> list[dict]:

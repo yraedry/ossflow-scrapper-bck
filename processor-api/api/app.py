@@ -166,6 +166,7 @@ from api.background_jobs import router as bg_jobs_router  # noqa: E402
 from api.burn_subs import router as burn_subs_router  # noqa: E402
 from api.health_proxy import router as health_proxy_router  # noqa: E402
 from api.subtitles import router as subtitles_router  # noqa: E402
+from api.dubbing import router as dubbing_router  # noqa: E402
 # WIRE_ORACLE_ROUTER
 from api import oracle as oracle_module  # noqa: E402
 # WIRE_TELEGRAM_ROUTER
@@ -187,6 +188,7 @@ app.include_router(bg_jobs_router)
 app.include_router(burn_subs_router)
 app.include_router(health_proxy_router)
 app.include_router(subtitles_router)
+app.include_router(dubbing_router)
 # WIRE_ORACLE_ROUTER
 app.include_router(oracle_module.router)
 # WIRE_TELEGRAM_ROUTER
@@ -225,6 +227,8 @@ _jobs: dict[str, JobInfo] = {}
 _job_events: dict[str, asyncio.Queue] = {}
 _jobs_store = JobsStore(_CONFIG_DIR / "jobs.json")
 _scan_cache = ScanCache(_CONFIG_DIR / "library.json")
+_library_refresh_lock = asyncio.Lock()
+_library_refresh_inflight = False
 
 
 def _persist_job(job: JobInfo) -> None:
@@ -651,12 +655,57 @@ async def api_scan(request: Request):
     return {"instructionals": library}
 
 
+def _kick_background_library_refresh() -> None:
+    """Fire-and-forget rescan of the library.
+
+    Never blocks the request. Coalesces concurrent refreshes via a module-level
+    flag so a page reload storm doesn't queue N parallel scans.
+    """
+    global _library_refresh_inflight
+    if _library_refresh_inflight:
+        return
+    from api.settings import get_library_path
+    root_path = get_library_path()
+    if not root_path or not Path(root_path).exists():
+        return
+
+    _library_refresh_inflight = True
+
+    def _scan_sync():
+        global _library_refresh_inflight
+        try:
+            lib = scan_library(root_path)
+            lib = enrich_with_poster(lib)
+            try:
+                _scan_cache.save(lib)
+            except Exception as exc:  # pragma: no cover
+                log.warning("Failed to persist library cache: %s", exc)
+        except Exception as exc:  # pragma: no cover
+            log.warning("background library refresh failed: %s", exc)
+        finally:
+            _library_refresh_inflight = False
+
+    asyncio.get_event_loop().run_in_executor(None, _scan_sync)
+
+
 @app.get("/api/library")
-async def api_library():
-    """Return cached library from the last scan, or 204 if no cache yet."""
+async def api_library(refresh: bool = False):
+    """Return cached library from the last scan, or 204 if no cache yet.
+
+    With ``refresh=1``: kicks a background rescan (fire-and-forget) and returns
+    the current cache immediately. The next poll picks up the refreshed data.
+    This avoids blocking the first page load on a NAS walk.
+    """
+    if refresh:
+        _kick_background_library_refresh()
+
     data = _scan_cache.load()
     if data is None:
-        return Response(status_code=204)
+        # Cold cache: still kick a scan so the next poll has data.
+        _kick_background_library_refresh()
+        return {"instructionals": [], "refreshing": True}
+    if isinstance(data, dict):
+        data = {**data, "refreshing": _library_refresh_inflight}
     return data
 
 
@@ -777,6 +826,49 @@ async def api_library_poster_upload(name: str, file: UploadFile = File(...)):
     dest.write_bytes(contents)
     patch_poster_in_cache(_scan_cache, name, dest.name)
     return {"saved": dest.name, "size": len(contents)}
+
+
+@app.post("/api/library/{name}/poster/redownload")
+async def api_library_poster_redownload(name: str):
+    """Re-download poster from the BJJFanatics URL stored in oracle metadata.
+
+    Preserves existing oracle sidecar; only replaces the local poster file.
+    Returns 404 if no oracle.poster_url is present.
+    """
+    from api.settings import get_library_path
+    from api.oracle import _download_poster_if_missing, SIDECAR_NAME
+    import json as _json
+
+    lib = get_library_path()
+    if not lib:
+        raise HTTPException(status_code=404, detail="library_path not configured")
+
+    base = Path(lib).resolve()
+    try:
+        target = (base / name).resolve()
+        target.relative_to(base)
+    except (OSError, ValueError):
+        raise HTTPException(status_code=403, detail="path traversal denied")
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(status_code=404, detail="instructional not found")
+
+    sidecar = target / SIDECAR_NAME
+    if not sidecar.exists():
+        raise HTTPException(status_code=404, detail="no oracle sidecar")
+    try:
+        meta = _json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"invalid sidecar: {exc}")
+
+    poster_url = (meta.get("oracle") or {}).get("poster_url")
+    if not poster_url:
+        raise HTTPException(status_code=404, detail="no poster_url in oracle")
+
+    saved = await _download_poster_if_missing(target, poster_url, force=True)
+    if not saved:
+        raise HTTPException(status_code=502, detail="poster download failed")
+    patch_poster_in_cache(_scan_cache, name, saved)
+    return {"saved": saved}
 
 
 @app.post("/api/library/{name}/refresh")

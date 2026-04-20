@@ -15,13 +15,11 @@ import { useStartPipeline } from '@/features/pipeline/api/usePipeline'
 import InstructionalHero from '@/features/library/components/InstructionalHero'
 import ChaptersTab from '@/features/library/components/ChaptersTab'
 import MetadataTab from '@/features/library/components/MetadataTab'
-import LogsTab from '@/features/library/components/LogsTab'
 import OracleTab from '@/features/library/components/OracleTab'
 
 const TABS = [
   { id: 'chapters', label: 'Capítulos' },
   { id: 'metadata', label: 'Metadatos' },
-  { id: 'logs', label: 'Logs' },
   { id: 'oracle', label: 'Oracle' },
 ]
 
@@ -100,12 +98,15 @@ export default function InstructionalDetailPage() {
         }
       }
 
+      const orderedSteps = [...steps]
+      const opts = { mode: 'oracle' }
+
       let lastId = null
       for (let i = 0; i < paths.length; i++) {
         const resp = await startPipeline.mutateAsync({
           path: paths[i],
-          steps,
-          options: { mode: 'oracle' },
+          steps: orderedSteps,
+          options: opts,
         })
         const id = resp?.pipeline_id || resp?.id
         if (!id) { toast.error('No se recibió pipeline_id'); break }
@@ -208,9 +209,6 @@ export default function InstructionalDetailPage() {
         </TabsContent>
         <TabsContent value="metadata" className="mt-0">
           <MetadataTab instructional={data} />
-        </TabsContent>
-        <TabsContent value="logs" className="mt-0">
-          <LogsTab instructional={data} />
         </TabsContent>
         <TabsContent value="oracle" className="mt-0">
           <OracleTab instructional={data} />

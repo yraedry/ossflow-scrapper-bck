@@ -16,6 +16,7 @@ import {
   Mic,
   ChevronDown,
   Languages,
+  Download,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/Badge'
@@ -28,16 +29,16 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
-import { posterUrl, useUploadPoster } from '../api/useLibrary'
+import { posterUrl, useUploadPoster, useRedownloadPoster } from '../api/useLibrary'
 
 const PIPELINE_STEPS = [
-  { id: 'chapters',   label: 'Capítulos',   Icon: Scissors,  desc: 'Detectar y trocear capítulos' },
-  { id: 'subtitles',  label: 'Subtítulos',  Icon: Captions,  desc: 'Transcripción EN con WhisperX' },
-  { id: 'translate',  label: 'Traducción',  Icon: Languages, desc: 'Traducir subtítulos EN → ES' },
-  { id: 'dubbing',    label: 'Doblaje',     Icon: Mic,       desc: 'Síntesis de voz ES con XTTS' },
+  { id: 'chapters',   label: 'Capítulos',    Icon: Scissors,  desc: 'Detectar y trocear capítulos' },
+  { id: 'subtitles',  label: 'Subtítulos',   Icon: Captions,  desc: 'Transcripción EN con WhisperX' },
+  { id: 'translate',  label: 'Traducción',   Icon: Languages, desc: 'Traducir subtítulos EN → ES' },
+  { id: 'dubbing',    label: 'Doblaje',      Icon: Mic,       desc: 'Genera guion .dub.es.srt + síntesis ES' },
 ]
 
-const STEPS_KEY = 'process_all_steps_v1'
+const STEPS_KEY = 'process_all_steps_v2'
 
 function loadSteps() {
   try {
@@ -116,6 +117,23 @@ export default function InstructionalHero({
   const src = poster && !posterErrored ? `${posterUrl(name)}?v=${cacheBust}` : null
 
   const upload = useUploadPoster()
+  const redownload = useRedownloadPoster()
+
+  const handleRedownload = async () => {
+    try {
+      await redownload.mutateAsync({ name })
+      setPosterErrored(false)
+      setCacheBust((n) => n + 1)
+      toast.success('Póster re-descargado desde Oracle')
+    } catch (err) {
+      const status = err?.status
+      if (status === 404) {
+        toast.error('Este instructional no tiene oracle.poster_url. Ejecuta Oracle primero.')
+      } else {
+        toast.error(`Error re-descargando póster: ${err?.message || 'desconocido'}`)
+      }
+    }
+  }
 
   const handleUpload = async (e) => {
     const file = e.target.files?.[0]
@@ -161,13 +179,13 @@ export default function InstructionalHero({
       <div className="relative flex flex-col gap-6 p-6 md:flex-row md:p-8">
         {/* Poster */}
         <div className="flex-shrink-0">
-          <div className="relative aspect-[2/3] w-[200px] overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 shadow-2xl md:w-[280px]">
+          <div className="relative aspect-[2/3] w-[200px] overflow-hidden rounded-lg border border-zinc-800 bg-black shadow-2xl md:w-[280px]">
             {src ? (
               <img
                 src={src}
                 alt={name}
                 onError={() => setPosterErrored(true)}
-                className="h-full w-full object-cover"
+                className="h-full w-full object-contain"
                 loading="lazy"
                 decoding="async"
               />
@@ -197,6 +215,21 @@ export default function InstructionalHero({
               <Upload className="mr-2 h-3.5 w-3.5" />
             )}
             {upload.isPending ? 'Subiendo…' : 'Cambiar póster'}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="mt-2 w-full text-zinc-400 hover:text-zinc-100"
+            onClick={handleRedownload}
+            disabled={redownload.isPending}
+            title="Re-descargar póster desde la URL de Oracle"
+          >
+            {redownload.isPending ? (
+              <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="mr-2 h-3.5 w-3.5" />
+            )}
+            {redownload.isPending ? 'Descargando…' : 'Re-descargar de Oracle'}
           </Button>
         </div>
 

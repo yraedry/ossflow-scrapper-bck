@@ -23,6 +23,24 @@ const STEP_ICONS = {
   dubbing: Mic,
 }
 
+// Human-readable Spanish labels. The backend step name is the key.
+// "translate" with dubbing_mode=true gets a distinct label so the user can
+// tell iso-sync adaptation apart from literal translation at a glance.
+const STEP_LABELS = {
+  chapters: 'Capítulos',
+  subtitles: 'Subtítulos',
+  translate: 'Traducción',
+  translate_dub: 'Guion doblaje',
+  dubbing: 'Doblaje',
+}
+
+function displayStepName(step) {
+  const isDubScript =
+    step.name === 'translate' && step.options?.dubbing_mode === true
+  const key = isDubScript ? 'translate_dub' : step.name
+  return STEP_LABELS[key] || step.name
+}
+
 function fmtDuration(sec) {
   if (!sec || sec < 0) return null
   const s = Math.round(sec)
@@ -149,8 +167,8 @@ export default function StepTimeline({ steps = [], eta = null, children }) {
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <StepIcon className="h-3.5 w-3.5 text-zinc-500" />
-                  <h3 className="text-sm font-medium capitalize text-zinc-100">
-                    {step.name}
+                  <h3 className="text-sm font-medium text-zinc-100">
+                    {displayStepName(step)}
                   </h3>
                   <span
                     className={cn(

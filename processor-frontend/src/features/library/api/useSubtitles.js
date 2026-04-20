@@ -44,12 +44,13 @@ export function useApplySegment() {
 
 export function useTranslateSrt() {
   return useMutation({
-    mutationFn: ({ srtPath, sourceLang = 'EN', targetLang = 'ES', formality }) =>
+    mutationFn: ({ srtPath, sourceLang = 'EN', targetLang = 'ES', formality, dubbingMode = false }) =>
       http.post('/subtitles/translate', {
         srt_path: srtPath,
         source_lang: sourceLang,
         target_lang: targetLang,
         formality,
+        dubbing_mode: dubbingMode,
       }),
   })
 }

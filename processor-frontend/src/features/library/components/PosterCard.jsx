@@ -44,14 +44,14 @@ function PosterCardInner({ instructional }) {
       aria-label={`Ver ${name}`}
     >
       <Card className="relative overflow-hidden border-border/60 bg-card/40 transition-shadow group-hover:shadow-lg">
-        <div className="relative aspect-[2/3] w-full">
+        <div className="relative aspect-[2/3] w-full bg-black">
           {hasPoster ? (
             <img
               src={src}
               alt={name}
               loading="lazy"
               onError={() => setImgError(true)}
-              className="h-full w-full object-cover object-top"
+              className="h-full w-full object-contain"
               draggable={false}
             />
           ) : (

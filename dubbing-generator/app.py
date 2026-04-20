@@ -7,6 +7,7 @@ Run:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,9 @@ _KIT_PARENT = Path(__file__).resolve().parent.parent
 if str(_KIT_PARENT) not in sys.path:
     sys.path.insert(0, str(_KIT_PARENT))
 
+from fastapi import HTTPException  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+
 from bjj_service_kit import JobEvent, RunRequest, create_app, emit_logs  # noqa: E402
 
 
@@ -22,16 +26,26 @@ SERVICE_NAME = "dubbing-generator"
 
 
 def _resolve_input(path: Path) -> Path:
-    """Validate input path exists. Returns the path as-is (file or directory)."""
     if not path.exists():
         raise FileNotFoundError(f"Path does not exist: {path}")
     return path
 
 
 def _resolve_srt_for(video_path: Path) -> Optional[Path]:
-    """Locate the Spanish SRT next to a video (prefers _ESP_DUB, then _ESP)."""
     base = video_path.with_suffix("")
-    for suffix in ("_ESP_DUB.srt", "_ESP.srt", "_ES.srt", ".es.srt", ".ES.srt"):
+    # If caller passed the dubbed output (<name>_DOBLADO.mkv), walk back
+    # to the source video stem — SRTs live next to the original, not the
+    # remux. Lets the UI pass video.path directly for debug calls.
+    stem = base.name
+    for dub_sfx in ("_DOBLADO",):
+        if stem.endswith(dub_sfx):
+            stem = stem[: -len(dub_sfx)]
+            base = base.parent / stem
+            break
+    # Híbrido: .es.srt literal (alineado con vídeo) preferido. El pipeline
+    # hace merge de líneas consecutivas para prosodia continua manteniendo
+    # anclaje al timestamp del vídeo. .dub.es.srt queda como fallback.
+    for suffix in (".es.srt", ".ES.srt", "_ES.srt", "_ESP.srt", ".dub.es.srt"):
         candidate = base.parent / f"{base.name}{suffix}"
         if candidate.exists():
             return candidate
@@ -47,10 +61,37 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
     logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 
     with emit_logs(emit, level=level):
+        import os
         from dubbing_generator.config import DubbingConfig  # type: ignore
         from dubbing_generator.pipeline import DubbingPipeline  # type: ignore
 
-        config = DubbingConfig(use_model_voice=bool(opts.get("use_model_voice", False)))
+        # Voice profile resolution (priority, highest first):
+        #   1. opts.model_voice_path — explicit absolute path from caller
+        #   2. opts.voice_profile    — filename like "narrador_es.wav"
+        #      resolved inside /voices (what the UI selector sends)
+        #   3. DUBBING_MODEL_VOICE_PATH env var — global default
+        # Falls back to cloning the instructor's own voice if none apply.
+        model_voice_path = opts.get("model_voice_path") or ""
+        voice_profile = opts.get("voice_profile") or ""
+        if not model_voice_path and voice_profile:
+            candidate = Path("/voices") / voice_profile
+            if candidate.exists():
+                model_voice_path = str(candidate)
+            else:
+                emit(JobEvent(type="log", data={
+                    "message": f"voice_profile '{voice_profile}' not found in /voices — cloning instructor"
+                }))
+        if not model_voice_path:
+            model_voice_path = os.environ.get("DUBBING_MODEL_VOICE_PATH") or ""
+
+        use_model_voice = bool(opts.get("use_model_voice"))
+        if not use_model_voice and model_voice_path:
+            use_model_voice = Path(model_voice_path).exists()
+
+        config = DubbingConfig(
+            use_model_voice=use_model_voice,
+            model_voice_path=model_voice_path,
+        )
 
         emit(JobEvent(type="log", data={"message": f"starting dubbing-generator on {input_path}"}))
         pipeline = DubbingPipeline(config)
@@ -58,6 +99,7 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
             srt = _resolve_srt_for(input_path)
             if srt is None:
                 raise FileNotFoundError(f"No Spanish SRT found for {input_path.name}")
+            emit(JobEvent(type="log", data={"message": f"using literal ES SRT: {srt.name}"}))
             out = pipeline.process_file(input_path, srt)
             emit(JobEvent(type="progress", data={"pct": 100, "videos": 1}))
             emit(JobEvent(type="log", data={"message": f"dubbed: {out.name}"}))
@@ -67,6 +109,258 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
 
 
 app = create_app(service_name=SERVICE_NAME, task_fn=_run_dubbing_generator)
+
+
+# ======================================================================
+# Voice profile listing
+# ======================================================================
+
+VOICES_DIR = Path("/voices")
+
+
+@app.get("/voices")
+def list_voices() -> dict:
+    """List WAV files available under /voices as selectable voice profiles.
+
+    Operators drop files in ``dubbing-generator/voices/`` (mounted to
+    ``/voices`` inside the container). The UI lets users pick one per
+    instructional; the chosen path is passed as ``model_voice_path``.
+    """
+    voices: list[dict] = []
+    if VOICES_DIR.exists():
+        for p in sorted(VOICES_DIR.iterdir()):
+            if p.is_file() and p.suffix.lower() in (".wav", ".flac", ".mp3"):
+                voices.append({
+                    "id": p.name,
+                    "path": str(p),
+                    "size_bytes": p.stat().st_size,
+                })
+    return {"voices": voices}
+
+
+# ======================================================================
+# Debug / Analyze endpoint
+# ======================================================================
+
+class AnalyzeRequest(BaseModel):
+    video_path: str
+    srt_path: Optional[str] = None
+    synthesize: bool = False      # if True, run TTS & measure real durations (slow)
+    max_phrases: Optional[int] = None  # cap synthesis to N phrases (for speed)
+    voice_profile: Optional[str] = None  # filename under /voices for ES ref
+    model_voice_path: Optional[str] = None  # explicit absolute path override
+
+
+@app.post("/analyze")
+def analyze_dubbing(req: AnalyzeRequest) -> dict:
+    """Diagnostic analysis of dubbing pipeline for a single video.
+
+    Returns:
+      - SRT blocks with durations + gaps
+      - Planned slots (aligner output with borrowed gap time)
+      - Density metrics (chars/ms → speed pressure per phrase)
+      - TTS fit report (estimated vs slot, compression ratios) — static by default
+      - If `synthesize=true`: actual TTS audio lengths, overflow/underflow,
+        overlap resolution, final timeline.
+    """
+    from dubbing_generator.config import DubbingConfig
+    from dubbing_generator.pipeline import parse_srt
+    from dubbing_generator.sync.aligner import SyncAligner
+    from dubbing_generator.sync.drift_corrector import DriftCorrector
+
+    vp = Path(req.video_path)
+    if not vp.exists():
+        raise HTTPException(status_code=404, detail=f"Video not found: {req.video_path}")
+
+    srt_p = Path(req.srt_path) if req.srt_path else _resolve_srt_for(vp)
+    if srt_p is None or not srt_p.exists():
+        raise HTTPException(status_code=404, detail=f"SRT not found for {vp.name}")
+
+    model_voice_path = req.model_voice_path or ""
+    if not model_voice_path and req.voice_profile:
+        candidate = Path("/voices") / req.voice_profile
+        if candidate.exists():
+            model_voice_path = str(candidate)
+    if not model_voice_path:
+        model_voice_path = os.environ.get("DUBBING_MODEL_VOICE_PATH") or ""
+
+    cfg = DubbingConfig(
+        use_model_voice=bool(model_voice_path and Path(model_voice_path).exists()),
+        model_voice_path=model_voice_path,
+    )
+    blocks = parse_srt(srt_p)
+    aligner = SyncAligner(cfg)
+    planned = aligner.plan(blocks)
+    drift = DriftCorrector(cfg)
+    drift.reset()
+
+    # 1. SRT blocks summary
+    srt_blocks = [
+        {
+            "idx": b.index,
+            "start_ms": b.start_ms,
+            "end_ms": b.end_ms,
+            "duration_ms": b.duration_ms,
+            "chars": len(b.text),
+            "text": b.text,
+        }
+        for b in blocks
+    ]
+
+    # 2. Gaps between SRT blocks
+    srt_gaps = []
+    for i in range(len(blocks) - 1):
+        gap = blocks[i + 1].start_ms - blocks[i].end_ms
+        if gap > 0:
+            srt_gaps.append({
+                "after_idx": blocks[i].index,
+                "gap_ms": gap,
+                "borrowed_by_previous": max(0, gap - cfg.inter_phrase_pad_ms),
+            })
+
+    # 3. Planned slots with density pressure
+    planned_rows = []
+    for i, p in enumerate(planned):
+        density = len(p.text) / max(p.allocated_ms, 1)
+        pressure = density / drift.DENSITY_BASE if drift.DENSITY_BASE > 0 else 1.0
+        est_tts_ms = len(p.text) * cfg.avg_ms_per_char
+        compression_needed = est_tts_ms / max(p.allocated_ms, 1)
+        planned_rows.append({
+            "idx": i,
+            "text": p.text[:80],
+            "target_start_ms": p.target_start_ms,
+            "allocated_ms": p.allocated_ms,
+            "chars": len(p.text),
+            "density": round(density, 5),
+            "pressure": round(pressure, 2),
+            "est_tts_ms": int(est_tts_ms),
+            "compression_needed": round(compression_needed, 2),
+            "will_overflow": compression_needed > cfg.max_compression_ratio,
+        })
+
+    # 4. Stats summary
+    overflow_count = sum(1 for r in planned_rows if r["will_overflow"])
+    compression_vals = [r["compression_needed"] for r in planned_rows if r["compression_needed"] > 0]
+    summary = {
+        "total_phrases": len(planned),
+        "total_chars": sum(len(p.text) for p in planned),
+        "total_allocated_ms": sum(p.allocated_ms for p in planned),
+        "srt_duration_ms": blocks[-1].end_ms if blocks else 0,
+        "will_overflow_count": overflow_count,
+        "max_compression": round(max(compression_vals), 2) if compression_vals else 0,
+        "avg_compression": round(sum(compression_vals) / len(compression_vals), 2) if compression_vals else 0,
+        "config": {
+            "tts_speed": cfg.tts_speed,
+            "max_compression_ratio": cfg.max_compression_ratio,
+            "min_phrase_duration_ms": cfg.min_phrase_duration_ms,
+            "max_overflow_ms": cfg.max_overflow_ms,
+            "inter_phrase_pad_ms": cfg.inter_phrase_pad_ms,
+            "speed_min": cfg.speed_min,
+            "speed_max": cfg.speed_max,
+            "ducking_bg_volume": cfg.ducking_bg_volume,
+            "ducking_fg_volume": cfg.ducking_fg_volume,
+        },
+    }
+
+    result = {
+        "video_path": str(vp),
+        "srt_path": str(srt_p),
+        "summary": summary,
+        "srt_blocks": srt_blocks,
+        "srt_gaps": srt_gaps,
+        "planned": planned_rows,
+        "synthesis": None,
+    }
+
+    # 5. Optional real synthesis pass
+    if req.synthesize:
+        result["synthesis"] = _run_synthesis_probe(
+            vp, planned, cfg, max_phrases=req.max_phrases,
+        )
+
+    return result
+
+
+def _run_synthesis_probe(video_path: Path, planned: list, cfg, max_phrases=None) -> dict:
+    """Actually run TTS on N phrases and report real durations.
+
+    Returns per-phrase actual tts_ms, post-stretch ms, overflow/underflow,
+    final placement after overlap resolution.
+    """
+    from dubbing_generator.audio.separator import AudioSeparator
+    from dubbing_generator.audio.stretcher import stretch_audio
+    from dubbing_generator.sync.drift_corrector import DriftCorrector
+    from dubbing_generator.tts.synthesizer import Synthesizer
+    from dubbing_generator.tts.voice_cloner import VoiceCloner
+    from pydub import AudioSegment
+
+    separator = AudioSeparator(cfg)
+    cloner = VoiceCloner(cfg)
+    synth = Synthesizer(cfg)
+    drift = DriftCorrector(cfg)
+    drift.reset()
+
+    separator.separate(video_path)
+    vocals_stem = video_path.with_name(f"{video_path.stem}_VOCALS.wav")
+    ref_wav = cloner.get_reference(
+        video_path, vocals_stem if vocals_stem.exists() else None,
+    )
+
+    phrases = planned[:max_phrases] if max_phrases else planned
+    rows = []
+
+    for i, block in enumerate(phrases):
+        if not block.text or len(block.text) < 2:
+            continue
+        density = len(block.text) / max(block.allocated_ms, 1)
+        speed = drift.check_density(i, density)
+
+        try:
+            raw = synth.generate(block.text, ref_wav, speed=speed)
+            raw_ms = len(raw)
+
+            target_ms = block.allocated_ms + cfg.max_overflow_ms
+            fitted = stretch_audio(
+                raw, target_duration_ms=target_ms,
+                max_ratio=cfg.max_compression_ratio,
+                min_ratio=cfg.min_compression_ratio,
+            )
+            fitted_ms = len(fitted)
+
+            rows.append({
+                "idx": i,
+                "text": block.text[:80],
+                "start_ms": block.target_start_ms,
+                "allocated_ms": block.allocated_ms,
+                "raw_tts_ms": raw_ms,
+                "fitted_ms": fitted_ms,
+                "speed_used": round(speed, 3),
+                "stretch_ratio": round(raw_ms / max(fitted_ms, 1), 3),
+                "overflow_vs_slot_ms": fitted_ms - block.allocated_ms,
+                "end_ms": block.target_start_ms + fitted_ms,
+            })
+        except Exception as exc:
+            rows.append({
+                "idx": i, "text": block.text[:80],
+                "error": str(exc),
+            })
+
+    # Overlap detection
+    overlaps = []
+    valid = [r for r in rows if "error" not in r]
+    for i in range(len(valid) - 1):
+        cur, nxt = valid[i], valid[i + 1]
+        if cur["end_ms"] > nxt["start_ms"]:
+            overlaps.append({
+                "between": [cur["idx"], nxt["idx"]],
+                "overlap_ms": cur["end_ms"] - nxt["start_ms"],
+            })
+
+    return {
+        "phrases": rows,
+        "overlaps": overlaps,
+        "ref_wav": str(ref_wav),
+    }
 
 
 if __name__ == "__main__":

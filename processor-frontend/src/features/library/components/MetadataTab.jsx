@@ -15,6 +15,7 @@ import { toast } from 'sonner'
 import {
   useInstructionalMetadata,
   useUpdateMetadata,
+  useVoiceProfiles,
 } from '../api/useLibrary'
 
 const schema = z.object({
@@ -28,6 +29,7 @@ const schema = z.object({
   tags: z.string().optional().default(''),
   url_bjjfanatics: z.string().url('URL inválida').optional().or(z.literal('')),
   poster_url: z.string().url('URL inválida').optional().or(z.literal('')),
+  voice_profile: z.string().optional().default(''),
 })
 
 function toFormValues(data) {
@@ -40,6 +42,7 @@ function toFormValues(data) {
     tags: Array.isArray(d.tags) ? d.tags.join(', ') : d.tags || '',
     url_bjjfanatics: d.url_bjjfanatics || '',
     poster_url: d.poster_url || '',
+    voice_profile: d.voice_profile || '',
   }
 }
 
@@ -58,6 +61,7 @@ function toPayload(values) {
     tags,
     url_bjjfanatics: values.url_bjjfanatics || '',
     poster_url: values.poster_url || '',
+    voice_profile: values.voice_profile || '',
   }
 }
 
@@ -65,6 +69,7 @@ export default function MetadataTab({ instructional }) {
   const name = instructional?.name
   const { data, isLoading, isError, error } = useInstructionalMetadata(name)
   const update = useUpdateMetadata()
+  const { data: voices = [] } = useVoiceProfiles()
 
   const {
     register,
@@ -175,6 +180,29 @@ export default function MetadataTab({ instructional }) {
                 </p>
               )}
             </div>
+          </div>
+
+          <div>
+            <Label htmlFor="voice_profile" className="text-xs">
+              Voz para doblaje
+            </Label>
+            <select
+              id="voice_profile"
+              {...register('voice_profile')}
+              className="mt-1 h-9 w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-500"
+            >
+              <option value="">Clonar voz del instructor (por defecto)</option>
+              {voices.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.id}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-zinc-500">
+              Añade WAV de narrador ES en{' '}
+              <code className="font-mono">dubbing-generator/voices/</code>{' '}
+              para eliminar el acento inglés. Vacío = clonar la voz original.
+            </p>
           </div>
 
           <div>

@@ -294,18 +294,7 @@ class BJJFanaticsProvider:
                 "h1.product-title not found - bjjfanatics layout changed"
             )
 
-        poster_url: str | None = None
-        og = tree.css_first('meta[property="og:image"]')
-        if og is not None:
-            content = og.attributes.get("content") if og.attributes else None
-            if content:
-                poster_url = content.strip() or None
-        if poster_url is None:
-            link = tree.css_first('link[rel="image_src"]')
-            if link is not None and link.attributes:
-                href = link.attributes.get("href")
-                if href:
-                    poster_url = href.strip() or None
+        poster_url = self._pick_best_poster(tree, url)
 
         accordion = tree.css_first("div.product__course-content-accordion")
         if accordion is None:
@@ -367,6 +356,181 @@ class BJJFanaticsProvider:
             raise ProviderScrapeError(
                 f"failed building OracleResult: {e}"
             ) from e
+
+    # ------------------------------------------------------------- poster
+
+    # Prefer portraits but accept anything at least slightly taller than wide.
+    # BJJFanatics ships both 4:3 hero shots and 2:3 cover variants; the
+    # portrait variant is the one that doesn't need letterbox in the UI.
+    _POSTER_RATIO_MIN = 0.60  # width/height — lower = more portrait
+    _POSTER_RATIO_PREFERRED = 0.70  # anything <= this is considered portrait
+    _POSTER_MIN_WIDTH = 400  # ignore thumbnails/icons
+
+    def _pick_best_poster(self, tree: HTMLParser, url: str) -> str | None:
+        """Find the most poster-like image for a BJJFanatics product page.
+
+        Tries, in order:
+          1. Shopify /products/<handle>.json — images come with width/height
+          2. Gallery <img> tags in the HTML (parsed for width attrs)
+          3. og:image / link[rel=image_src] as final fallback
+
+        Picks the image with the most portrait aspect ratio ≥ _POSTER_RATIO_MIN.
+        Returns ``None`` only if nothing at all matched.
+        """
+        candidates: list[tuple[str, int, int]] = []  # (url, w, h)
+
+        # 1. Shopify product JSON — authoritative dimensions
+        try:
+            candidates.extend(self._poster_candidates_from_json(url))
+        except Exception as exc:  # pragma: no cover — network/parse noise
+            logger.debug("shopify json poster lookup failed: %s", exc)
+
+        # 2. HTML gallery fallback
+        if not candidates:
+            candidates.extend(self._poster_candidates_from_html(tree))
+
+        # 3. og:image with og:image:width/height meta hints
+        og_candidate = self._poster_candidate_from_og(tree)
+        if og_candidate is not None:
+            candidates.append(og_candidate)
+
+        best = self._select_portrait(candidates)
+        if best:
+            return self._strip_shopify_size(best)
+
+        # Last-resort: raw og:image / image_src, no dimensions known
+        og = tree.css_first('meta[property="og:image"]')
+        if og is not None and og.attributes:
+            content = og.attributes.get("content")
+            if content and content.strip():
+                return self._strip_shopify_size(content.strip())
+        link = tree.css_first('link[rel="image_src"]')
+        if link is not None and link.attributes:
+            href = link.attributes.get("href")
+            if href and href.strip():
+                return self._strip_shopify_size(href.strip())
+        return None
+
+    def _poster_candidate_from_og(
+        self, tree: HTMLParser
+    ) -> tuple[str, int, int] | None:
+        og = tree.css_first('meta[property="og:image"]')
+        if og is None or not og.attributes:
+            return None
+        src = (og.attributes.get("content") or "").strip()
+        if not src:
+            return None
+        w_node = tree.css_first('meta[property="og:image:width"]')
+        h_node = tree.css_first('meta[property="og:image:height"]')
+        try:
+            w = int((w_node.attributes.get("content") if w_node and w_node.attributes else "0") or 0)
+            h = int((h_node.attributes.get("content") if h_node and h_node.attributes else "0") or 0)
+        except (TypeError, ValueError):
+            return None
+        if w <= 0 or h <= 0:
+            return None
+        return (src, w, h)
+
+    @staticmethod
+    def _strip_shopify_size(url: str) -> str:
+        """Remove Shopify CDN size-mutation query params.
+
+        og:image often ships a 300×300 center-cropped thumbnail (``?crop=center
+        &height=300&width=300``). Stripping those params yields the full-res
+        original which preserves the portrait aspect ratio.
+        """
+        if "cdn.shop" not in url and "cdn.shopify" not in url:
+            return url
+        try:
+            base, _, query = url.partition("?")
+            if not query:
+                return url
+            keep = []
+            for part in query.split("&"):
+                key = part.split("=", 1)[0].lower()
+                if key in {"width", "height", "crop", "pad_color"}:
+                    continue
+                keep.append(part)
+            return base + ("?" + "&".join(keep) if keep else "")
+        except Exception:
+            return url
+
+    def _poster_candidates_from_json(
+        self, product_url: str
+    ) -> list[tuple[str, int, int]]:
+        m = re.search(r"/products/([^/?#]+)", product_url)
+        if not m:
+            return []
+        handle = m.group(1)
+        json_url = f"{_PRODUCT_BASE}{handle}.json"
+        resp = _http_get_with_retry(self._client, json_url)
+        if resp.status_code >= 400:
+            return []
+        try:
+            payload = resp.json()
+        except ValueError:
+            return []
+        product = payload.get("product") if isinstance(payload, dict) else None
+        if not isinstance(product, dict):
+            return []
+        images = product.get("images") or []
+        out: list[tuple[str, int, int]] = []
+        for img in images:
+            if not isinstance(img, dict):
+                continue
+            src = img.get("src") or ""
+            w = img.get("width") or 0
+            h = img.get("height") or 0
+            if not isinstance(w, int) or not isinstance(h, int):
+                continue
+            if src and w > 0 and h > 0:
+                out.append((src, w, h))
+        return out
+
+    def _poster_candidates_from_html(
+        self, tree: HTMLParser
+    ) -> list[tuple[str, int, int]]:
+        out: list[tuple[str, int, int]] = []
+        for img in tree.css("img"):
+            attrs = img.attributes or {}
+            src = attrs.get("src") or attrs.get("data-src") or ""
+            if not src or "cdn.shopify.com" not in src:
+                continue
+            w_raw = attrs.get("width") or "0"
+            h_raw = attrs.get("height") or "0"
+            try:
+                w, h = int(w_raw), int(h_raw)
+            except (TypeError, ValueError):
+                continue
+            if w > 0 and h > 0:
+                out.append((src.strip(), w, h))
+        return out
+
+    def _select_portrait(
+        self, candidates: list[tuple[str, int, int]]
+    ) -> str | None:
+        """Pick the most portrait candidate that also meets the min-width bar.
+
+        Sorts by (ratio asc, height desc) so we prefer taller portraits over
+        wider ones with the same ratio.
+        """
+        viable = [
+            (url, w, h)
+            for (url, w, h) in candidates
+            if w >= self._POSTER_MIN_WIDTH and (w / h) <= self._POSTER_RATIO_MIN
+        ]
+        if not viable:
+            # Accept anything portrait-ish if no strict match
+            viable = [
+                (url, w, h)
+                for (url, w, h) in candidates
+                if w >= self._POSTER_MIN_WIDTH
+                and (w / h) <= self._POSTER_RATIO_PREFERRED
+            ]
+        if not viable:
+            return None
+        viable.sort(key=lambda t: (t[1] / t[2], -t[2]))
+        return viable[0][0]
 
     def _parse_volume(self, h3_node, content_node) -> OracleVolume | None:
         h3_text = h3_node.text(strip=True) or ""

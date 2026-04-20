@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 from pydub import AudioSegment
@@ -24,8 +25,8 @@ class AudioMixer:
     """Mix background + TTS voice with ducking.
 
     During TTS voice playback the background is reduced to
-    ``ducking_bg_volume`` (default 0.3x) with fade transitions of
-    ``ducking_fade_ms`` (default 200 ms).
+    ``ducking_bg_volume`` with fade transitions of ``ducking_fade_ms``.
+    The TTS is boosted by ``ducking_fg_volume`` so it dominates clearly.
     """
 
     def __init__(self, config: DubbingConfig) -> None:
@@ -45,40 +46,74 @@ class AudioMixer:
         if not tts_segments:
             return background
 
-        bg = background
-        ducking_db = self._volume_to_db(self.cfg.ducking_bg_volume)
+        fg_db = _vol_to_db(self.cfg.ducking_fg_volume)
+        ducking_db = _vol_to_db(self.cfg.ducking_bg_volume)
         fade_ms = self.cfg.ducking_fade_ms
 
-        # Build a volume automation envelope on the background
-        # by applying gain reduction in regions where TTS is active.
-        ducked_bg = self._apply_ducking(bg, tts_segments, ducking_db, fade_ms)
+        allow_tail = getattr(self.cfg, "allow_video_tail_extension", False)
+        tail_max = getattr(self.cfg, "video_tail_extension_max_ms", 8000)
 
-        # Overlay TTS segments at their respective start positions
-        result = ducked_bg
+        bg_len = len(background)
+        last_tts_end = max(
+            (seg.start_ms + len(seg.audio) for seg in tts_segments), default=0,
+        )
+
+        if allow_tail and last_tts_end > bg_len:
+            # Extend background with silence so trailing ES phrases remain
+            # fully audible. Cap extension to avoid runaway (bad SRT → huge pad).
+            pad_ms = min(last_tts_end - bg_len, tail_max)
+            if last_tts_end - bg_len > tail_max:
+                logger.warning(
+                    "TTS exceeds video by %d ms but tail cap is %d ms; "
+                    "trailing speech will be clipped",
+                    last_tts_end - bg_len, tail_max,
+                )
+            background = background + AudioSegment.silent(
+                duration=pad_ms, frame_rate=background.frame_rate,
+            )
+            bg_len = len(background)
+            logger.info("Extended audio track by %d ms to fit ES tail", pad_ms)
+
+        # Clip only phrases that still fall outside the (possibly extended) bg.
+        clipped_segments: list[TtsSegment] = []
         for seg in tts_segments:
+            if seg.start_ms >= bg_len:
+                logger.warning(
+                    "Dropping TTS starting at %d ms (past audio end %d ms)",
+                    seg.start_ms, bg_len,
+                )
+                continue
+            audio = seg.audio
+            end_ms = seg.start_ms + len(audio)
+            if end_ms > bg_len:
+                trim_to = max(0, bg_len - seg.start_ms)
+                if trim_to <= 0:
+                    continue
+                fade = min(60, trim_to // 4)
+                audio = audio[:trim_to].fade_out(fade) if fade > 0 else audio[:trim_to]
+            clipped_segments.append(TtsSegment(
+                audio=audio, start_ms=seg.start_ms, end_ms=seg.start_ms + len(audio),
+            ))
+
+        if not clipped_segments:
+            return background
+
+        # Build ducked background (concatenation approach — preserves length)
+        ducked_bg = self._apply_ducking(background, clipped_segments, ducking_db, fade_ms)
+
+        # Overlay TTS on top of ducked background
+        result = ducked_bg
+        for seg in clipped_segments:
             if len(seg.audio) == 0:
                 continue
-            # Ensure TTS volume is at the configured level
-            fg_db = self._volume_to_db(self.cfg.ducking_fg_volume)
-            tts_audio = seg.audio.apply_gain(fg_db)
-            result = result.overlay(tts_audio, position=seg.start_ms)
+            tts_boosted = seg.audio.apply_gain(fg_db)
+            result = result.overlay(tts_boosted, position=seg.start_ms)
 
         return result
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _volume_to_db(ratio: float) -> float:
-        """Convert a linear volume ratio to dB gain adjustment.
-
-        ratio=1.0 -> 0 dB, ratio=0.3 -> ~-10.5 dB.
-        """
-        if ratio <= 0:
-            return -120.0
-        import math
-        return 20.0 * math.log10(ratio)
 
     def _apply_ducking(
         self,
@@ -87,55 +122,66 @@ class AudioMixer:
         ducking_db: float,
         fade_ms: int,
     ) -> AudioSegment:
-        """Reduce background volume during TTS segments with fade transitions."""
+        """Reduce background during TTS regions.
 
-        # Sort segments by start time
+        Uses concatenation to preserve exact timeline length.
+        The duck regions use apply_gain so the total length is unchanged.
+        """
         sorted_segs = sorted(segments, key=lambda s: s.start_ms)
 
-        # Merge overlapping/adjacent regions
+        # Merge overlapping/adjacent TTS regions (with fade padding)
         regions: list[tuple[int, int]] = []
         for seg in sorted_segs:
-            start = max(0, seg.start_ms - fade_ms)
-            end = min(len(bg), seg.start_ms + len(seg.audio) + fade_ms)
-            if regions and start <= regions[-1][1]:
-                regions[-1] = (regions[-1][0], max(regions[-1][1], end))
+            r_start = max(0, seg.start_ms - fade_ms)
+            r_end = min(len(bg), seg.start_ms + len(seg.audio) + fade_ms)
+            if r_end <= r_start:
+                continue
+            if regions and r_start <= regions[-1][1]:
+                regions[-1] = (regions[-1][0], max(regions[-1][1], r_end))
             else:
-                regions.append((start, end))
+                regions.append((r_start, r_end))
 
         if not regions:
             return bg
 
-        # Build the ducked background by assembling pieces
+        # Assemble ducked background by splicing
         result = AudioSegment.empty()
         prev_end = 0
 
-        for region_start, region_end in regions:
-            # Unchanged part before this region
-            if region_start > prev_end:
-                result += bg[prev_end:region_start]
+        for r_start, r_end in regions:
+            # Unchanged gap before this region
+            if r_start > prev_end:
+                result += bg[prev_end:r_start]
 
-            # Ducked region with fade in/out
-            region = bg[region_start:region_end]
-            ducked = region.apply_gain(ducking_db)
+            # Duck this region
+            chunk = bg[r_start:r_end]
+            chunk_len = len(chunk)
 
-            # Apply fade-in (at the start of ducking = volume goes DOWN)
-            if fade_ms > 0 and len(ducked) > fade_ms:
-                ducked = ducked.fade(
-                    from_gain=0.0, to_gain=ducking_db,
+            # Fade from full → ducked at entry
+            if fade_ms > 0 and chunk_len > fade_ms * 2:
+                chunk = chunk.fade(
+                    from_gain=0, to_gain=ducking_db,
                     start=0, duration=fade_ms,
                 )
-            # Apply fade-out (at the end of ducking = volume goes back UP)
-            if fade_ms > 0 and len(ducked) > 2 * fade_ms:
-                ducked = ducked.fade(
-                    from_gain=ducking_db, to_gain=0.0,
-                    start=len(ducked) - fade_ms, duration=fade_ms,
+                # Fade from ducked → full at exit
+                chunk = chunk.fade(
+                    from_gain=ducking_db, to_gain=0,
+                    start=chunk_len - fade_ms, duration=fade_ms,
                 )
+            else:
+                chunk = chunk.apply_gain(ducking_db)
 
-            result += ducked
-            prev_end = region_end
+            result += chunk
+            prev_end = r_end
 
-        # Append remaining background after the last region
+        # Remainder after last ducked region
         if prev_end < len(bg):
             result += bg[prev_end:]
 
         return result
+
+
+def _vol_to_db(ratio: float) -> float:
+    if ratio <= 0:
+        return -120.0
+    return 20.0 * math.log10(ratio)

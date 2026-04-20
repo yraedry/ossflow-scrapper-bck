@@ -42,13 +42,15 @@ import { useOracleData } from '@/features/oracle/api/useOracle'
 import SubtitleValidationDialog from './SubtitleValidationDialog'
 import SeasonValidationDialog from './SeasonValidationDialog'
 import AudioAnalysisDialog from './AudioAnalysisDialog'
+import DubbingAnalysisDialog from './DubbingAnalysisDialog'
 import useAudioAnalysis from '../stores/useAudioAnalysis'
+import useDubbingAnalysis from '../stores/useDubbingAnalysis'
 import VideoReviewDialog from '@/components/media/VideoReviewDialog'
 
 function srtPathFor(videoPath) {
   if (!videoPath) return null
   const dot = videoPath.lastIndexOf('.')
-  return dot > 0 ? `${videoPath.slice(0, dot)}.srt` : `${videoPath}.srt`
+  return dot > 0 ? `${videoPath.slice(0, dot)}.en.srt` : `${videoPath}.en.srt`
 }
 
 // `{prefix} - SNNeMM - {title}{ext}` → just the title
@@ -92,7 +94,9 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
   const [err, setErr] = useState(null)
   const [validateOpen, setValidateOpen] = useState(false)
   const [debugOpen, setDebugOpen] = useState(false)
+  const [dubDebugOpen, setDubDebugOpen] = useState(false)
   const analysisJob = useAudioAnalysis((s) => s.jobs[video.path])
+  const dubAnalysisJob = useDubbingAnalysis((s) => s.jobs[video.path])
   const [playerOpen, setPlayerOpen] = useState(false)
   const inputRef = useRef(null)
   const nav = useNavigate()
@@ -177,21 +181,23 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
     const order = ['chapters', 'subtitles', 'translate', 'dubbing']
     const sorted = order.filter((s) => selectedSteps.includes(s))
     if (!sorted.length && !burnAfter) return
+
+    const launchingId = toast.loading('Lanzando pipeline…')
     try {
       if (sorted.length) {
         const opts = forceRegen ? { force: true } : {}
         if (hasOracle && sorted.includes('chapters')) opts.mode = 'oracle'
         const resp = await startSplit.mutateAsync({ path: video.path, steps: sorted, options: opts })
         const id = resp?.pipeline_id || resp?.id
-        toast.success('Pipeline lanzado')
+        toast.success('Pipeline lanzado', { id: launchingId })
         if (id) nav(`/pipelines/${id}`)
       }
       if (burnAfter) {
         await burnSubs.mutateAsync({ path: video.path })
-        toast.success('Quema de subs iniciada')
+        toast.success('Quema de subs iniciada', { id: launchingId })
       }
     } catch (e) {
-      toast.error(`Error: ${e?.message || 'desconocido'}`)
+      toast.error(`Error: ${e?.message || 'desconocido'}`, { id: launchingId })
     }
   }
 
@@ -206,6 +212,7 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
       toast.error(`Traducción falló: ${msg}`)
     }
   }
+
 
   const handleSplit = async () => {
     try {
@@ -326,22 +333,21 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
             <Eye className="mr-1 h-3 w-3" />
             Ver
           </Button>
-          {hasSubs && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setValidateOpen(true)}
-              title="Validar calidad de los subtítulos (detectar alucinaciones)"
-            >
-              <ShieldCheck className="mr-1 h-3 w-3" />
-              Validar
-            </Button>
-          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setValidateOpen(true)}
+            disabled={!hasSubs}
+            title={hasSubs ? 'Validar calidad de los subtítulos (detectar alucinaciones)' : 'Sin subtítulos EN que validar'}
+          >
+            <ShieldCheck className="mr-1 h-3 w-3" />
+            Validar
+          </Button>
           <Button
             size="sm"
             variant="ghost"
             onClick={() => setDebugOpen(true)}
-            title="Análisis de audio (debug)"
+            title="Análisis de audio (debug subs)"
             className={cn(
               analysisJob?.status === 'pending' && 'text-blue-400',
               analysisJob?.status === 'done' && 'text-emerald-400',
@@ -355,22 +361,44 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
             )}
             {analysisJob?.status === 'done' ? 'Ver análisis' : 'Debug'}
           </Button>
-          {hasSubs && !hasSubsEs && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={handleTranslate}
-              disabled={translate.isPending}
-              title="Traducir subtítulos EN → ES (DeepL)"
-            >
-              {translate.isPending ? (
-                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-              ) : (
-                <Languages className="mr-1 h-3 w-3" />
-              )}
-              Traducir
-            </Button>
-          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setDubDebugOpen(true)}
+            title="Análisis del doblaje (debug dubbing)"
+            className={cn(
+              dubAnalysisJob?.status === 'pending' && 'text-purple-400',
+              dubAnalysisJob?.status === 'done' && 'text-emerald-400',
+              dubAnalysisJob?.status === 'error' && 'text-red-400',
+            )}
+          >
+            {dubAnalysisJob?.status === 'pending' ? (
+              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+            ) : (
+              <Mic className="mr-1 h-3 w-3" />
+            )}
+            {dubAnalysisJob?.status === 'done' ? 'Ver dub' : 'Dub dbg'}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleTranslate}
+            disabled={translate.isPending || !hasSubs || hasSubsEs}
+            title={
+              !hasSubs
+                ? 'Sin subtítulos EN para traducir'
+                : hasSubsEs
+                  ? 'Ya tiene subtítulos ES'
+                  : 'Traducir subtítulos EN → ES'
+            }
+          >
+            {translate.isPending ? (
+              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+            ) : (
+              <Languages className="mr-1 h-3 w-3" />
+            )}
+            Traducir
+          </Button>
           <DropdownMenu open={processOpen} onOpenChange={setProcessOpen}>
             <DropdownMenuTrigger asChild>
               <Button size="sm" variant="ghost" onClick={openProcessMenu}>
@@ -384,7 +412,7 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
                 { key: 'chapters', label: 'Trocear capítulos', Icon: Scissors, done: isChaptered },
                 { key: 'subtitles', label: 'Subtítulos EN', Icon: Captions, done: hasSubs },
                 { key: 'translate', label: 'Traducir a ES', Icon: Languages, done: hasSubsEs },
-                { key: 'dubbing', label: 'Doblar a ES', Icon: Mic, done: hasDub },
+                { key: 'dubbing', label: 'Doblaje', Icon: Mic, done: hasDub },
               ].map(({ key, label, Icon: StepIcon, done }) => {
                 const locked = done && !forceRegen
                 return (
@@ -484,6 +512,13 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
             videoPath={video.path}
           />
         )}
+        {dubDebugOpen && (
+          <DubbingAnalysisDialog
+            open={dubDebugOpen}
+            onOpenChange={setDubDebugOpen}
+            videoPath={video.path}
+          />
+        )}
         {playerOpen && (
           <VideoReviewDialog
             open={playerOpen}
@@ -507,7 +542,7 @@ function deriveSeasonPath(list) {
   return idx > 0 ? first.slice(0, idx) : null
 }
 
-function SeasonPipelineButton({ seasonPath, steps, label, Icon, title, hasOracle }) {
+function SeasonPipelineButton({ seasonPath, steps, label, Icon, title, hasOracle, extraOptions }) {
   const nav = useNavigate()
   const start = useStartPipeline()
   const onClick = async (e) => {
@@ -516,15 +551,16 @@ function SeasonPipelineButton({ seasonPath, steps, label, Icon, title, hasOracle
       toast.error('No se pudo inferir la ruta de la Season')
       return
     }
+    const tid = toast.loading(`Lanzando ${label}…`)
     try {
-      const opts = {}
+      const opts = { ...(extraOptions || {}) }
       if (hasOracle && steps.includes('chapters')) opts.mode = 'oracle'
       const resp = await start.mutateAsync({ path: seasonPath, steps, options: opts })
       const id = resp?.pipeline_id || resp?.id
-      toast.success('Pipeline lanzado')
+      toast.success('Pipeline lanzado', { id: tid })
       if (id) nav(`/pipelines/${id}`)
     } catch (err) {
-      toast.error(`Error: ${err?.message || 'desconocido'}`)
+      toast.error(`Error: ${err?.message || 'desconocido'}`, { id: tid })
     }
   }
   return (
@@ -728,7 +764,7 @@ export default function ChaptersTab({ instructional }) {
                     <SeasonPipelineButton
                       seasonPath={seasonPath}
                       steps={['dubbing']}
-                      label="Doblar"
+                      label="Doblaje"
                       Icon={Mic}
                       title="Doblar todos los capítulos de la Season"
                     />

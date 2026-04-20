@@ -1,0 +1,257 @@
+# ============================================================
+# BJJ Instructional Processor — Docker Compose
+# ============================================================
+# Levanta todo: docker compose up -d
+#
+# Servicios:
+#   - processor-api:       FastAPI gateway         → :8000
+#   - processor-frontend:  React 18 UI             → :3000
+#   - chapter-splitter:    OCR + split (GPU)       → :8001
+#   - subtitle-generator:  WhisperX (GPU)          → :8002
+#   - dubbing-generator:   Coqui XTTS v2 (GPU)     → :8003
+#
+# Variables:
+#   LIBRARY_PATH  → ruta host con los instruccionales (default /mnt/library)
+# ============================================================
+
+services:
+
+  # Imagen base CUDA compartida. No levanta como servicio — solo se usa como
+  # build target. docker compose build bjj-base → luego los servicios GPU la usan.
+  bjj-base:
+    build:
+      context: .
+      dockerfile: ./bjj-base/Dockerfile
+    image: bjj-base:latest
+    pull_policy: never
+    profiles: ["base"]
+
+  processor-api:
+    build:
+      context: .
+      dockerfile: ./processor-api/Dockerfile
+    container_name: processor-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - config-data:/data/config
+      - bjj-db:/data/db
+      - voice-profiles:/app/voice_profiles/samples
+      - search-index:/app/search
+      - nas-library:/media:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONFIG_DIR=/data/config
+      - BJJ_DB_PATH=/data/db/bjj.db
+      - MEDIA_ROOT=/media
+      - SPLITTER_URL=http://chapter-splitter:8001
+      - SIGNAL_SPLITTER_URL=http://chapter-splitter-signal:8001
+      - SUBS_URL=http://subtitle-generator:8002
+      - DUBBING_URL=http://dubbing-generator:8003
+      - TELEGRAM_FETCHER_URL=http://telegram-fetcher:8004
+    depends_on:
+      chapter-splitter:
+        condition: service_healthy
+      subtitle-generator:
+        condition: service_healthy
+      dubbing-generator:
+        condition: service_healthy
+    networks:
+      - bjj_net
+    # Necesario para montar shares SMB/CIFS del NAS
+    privileged: true
+    restart: unless-stopped
+
+  processor-frontend:
+    build:
+      context: ./processor-frontend
+      dockerfile: Dockerfile
+    container_name: processor-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - processor-api
+    networks:
+      - bjj_net
+    restart: unless-stopped
+
+  # Default chapter-splitter: lean image (~200MB). Oracle workflow only.
+  # No GPU, no torch, no easyocr. Suficiente para 100% de la biblioteca BJJFanatics.
+  chapter-splitter:
+    build:
+      context: .
+      dockerfile: ./chapter-splitter/Dockerfile.oracle
+    container_name: chapter-splitter
+    ports:
+      - "8001:8001"
+    volumes:
+      - nas-library:/media:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - bjj_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # Heavy fallback: detector por señales (OCR + Demucs + GPU). ~13GB.
+  # Solo se levanta con: docker compose --profile signal up -d
+  chapter-splitter-signal:
+    profiles: ["signal"]
+    build:
+      context: .
+      dockerfile: ./chapter-splitter/Dockerfile
+    container_name: chapter-splitter-signal
+    ports:
+      - "8011:8001"
+    volumes:
+      - nas-library:/media:rw
+      - hf-cache:/models/huggingface
+      - torch-cache:/models/torch
+      - model-cache:/models/cache
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+    networks:
+      - bjj_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  subtitle-generator:
+    build:
+      context: .
+      dockerfile: ./subtitle-generator/Dockerfile
+    container_name: subtitle-generator
+    ports:
+      - "8002:8002"
+    volumes:
+      - nas-library:/media:rw
+      - hf-cache:/models/huggingface
+      - torch-cache:/models/torch
+      - model-cache:/models/cache
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+    networks:
+      - bjj_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  dubbing-generator:
+    build:
+      context: .
+      dockerfile: ./dubbing-generator/Dockerfile
+    container_name: dubbing-generator
+    ports:
+      - "8003:8003"
+    volumes:
+      - nas-library:/media:rw
+      - hf-cache:/models/huggingface
+      - torch-cache:/models/torch
+      - model-cache:/models/cache
+      # Native ES voice samples. Drop a WAV (16-24kHz mono, 20-40 s of clean
+      # Spanish speech) and set DUBBING_MODEL_VOICE_PATH to avoid the
+      # instructor's English accent bleeding into the ES output.
+      - ./dubbing-generator/voices:/voices:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - TORCH_HOME=/models/torch
+      - HF_HOME=/models/huggingface
+      - XDG_CACHE_HOME=/models/cache
+      # Empty by default → pipeline clones instructor voice (may carry accent).
+      # Set to e.g. /voices/narrador_es.wav to force native ES prosody.
+      - DUBBING_MODEL_VOICE_PATH=${DUBBING_MODEL_VOICE_PATH:-}
+    networks:
+      - bjj_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # Telegram channel media fetcher (lean, ~250MB). No GPU.
+  # Los retries con backoff en el cliente manejan el orden de arranque — no depende de processor-api.
+  telegram-fetcher:
+    build:
+      context: .
+      dockerfile: ./telegram-fetcher/Dockerfile
+    container_name: telegram-fetcher
+    ports:
+      - "8004:8004"
+    volumes:
+      - tg-session:/data/session
+      - tg-cache:/data/cache
+      - bjj-db:/data/db
+      - nas-library:/media:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PROCESSOR_API_URL=http://processor-api:8000
+      - BJJ_DB_PATH=/data/db/bjj.db
+    networks:
+      - bjj_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  config-data:
+  bjj-db:
+  voice-profiles:
+  search-index:
+  hf-cache:
+  torch-cache:
+  model-cache:
+  tg-session:
+  tg-cache:
+  nas-library:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: //${NAS_HOST}/${NAS_SHARE}
+      o: "username=${NAS_USER},password=${NAS_PASS},uid=0,gid=0,vers=3.0,cache=strict,iocharset=utf8"
+
+networks:
+  bjj_net:
+    driver: bridge

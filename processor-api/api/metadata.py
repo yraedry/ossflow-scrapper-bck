@@ -25,6 +25,10 @@ DEFAULT_METADATA: dict[str, Any] = {
     "tags": [],
     "synopsis": "",
     "year": None,
+    # voice_profile: filename under /voices (e.g. "narrador_es.wav") or "" to
+    # clone the instructor's own voice. Read by pipeline.py when queuing the
+    # dubbing step for this instructional.
+    "voice_profile": "",
 }
 
 
@@ -64,6 +68,7 @@ def _validate_payload(data: Any) -> dict[str, Any]:
     tags = data.get("tags", [])
     synopsis = data.get("synopsis", "")
     year = data.get("year", None)
+    voice_profile = data.get("voice_profile", "")
 
     if not isinstance(instructor, str):
         raise HTTPException(status_code=422, detail="instructor must be string")
@@ -77,6 +82,8 @@ def _validate_payload(data: Any) -> dict[str, Any]:
         # Accept ints, and numeric strings that parse to int.
         if isinstance(year, bool) or not isinstance(year, int):
             raise HTTPException(status_code=422, detail="year must be integer or null")
+    if not isinstance(voice_profile, str):
+        raise HTTPException(status_code=422, detail="voice_profile must be string")
 
     return {
         "instructor": instructor,
@@ -84,6 +91,7 @@ def _validate_payload(data: Any) -> dict[str, Any]:
         "tags": tags,
         "synopsis": synopsis,
         "year": year,
+        "voice_profile": voice_profile,
     }
 
 
@@ -104,6 +112,8 @@ async def get_metadata(name: str):
         for k in DEFAULT_METADATA:
             if k in raw:
                 result[k] = raw[k]
+    # Cache oracle.poster_url alongside so UI can surface re-download state
+    # without a second read. Not validated in PUT — oracle owns writes.
     return JSONResponse(result)
 
 

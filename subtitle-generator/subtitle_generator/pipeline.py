@@ -145,6 +145,11 @@ class SubtitlePipeline:
         log.info("  Writing SRT: %s", output_srt.name)
         subtitles = self.writer.write_srt(all_words, output_srt)
 
+        # 7b. Persist word-timestamps alongside the SRT. Required by the
+        # dubbing nivel-3 pipeline (dub_segmenter) to re-segment speech by
+        # real pauses instead of inheriting reading-oriented SRT slots.
+        self._write_words_json(all_words, video_path)
+
         # 8. Validate
         self.validator.validate(subtitles, audio_duration)
 
@@ -367,6 +372,28 @@ class SubtitlePipeline:
                 })
 
         return recovered
+
+    def _write_words_json(self, words: list[dict], video_path: Path) -> None:
+        """Dump word-level timestamps as <video>.words.json.
+
+        Enables the dubbing nivel-3 pipeline to re-segment speech from the
+        original audio rhythm rather than the reading-oriented SRT blocks.
+        """
+        import json
+
+        out = video_path.with_name(video_path.stem + ".words.json")
+        payload = [
+            {
+                "word": str(w.get("word", "")).strip(),
+                "start": round(float(w.get("start", 0.0)), 3),
+                "end": round(float(w.get("end", 0.0)), 3),
+                "score": round(float(w.get("score", 0.0)), 3),
+            }
+            for w in words
+            if str(w.get("word", "")).strip()
+        ]
+        out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        log.info("  Wrote %d word-timestamps to %s", len(payload), out.name)
 
     def _flatten_words(self, segments: list[dict]) -> list[dict]:
         """Extract all words from segments, with fallback for segments without word-level data."""

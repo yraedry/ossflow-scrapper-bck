@@ -1,4 +1,4 @@
-"""Phrase synchronization with lookahead-based time allocation."""
+"""Phrase synchronization with gap-aware time allocation."""
 
 from __future__ import annotations
 
@@ -33,90 +33,58 @@ class PlannedBlock:
 
 
 class SyncAligner:
-    """Plan timing for TTS phrases using lookahead groups.
+    """Plan timing for TTS phrases respecting SRT timestamps.
 
-    The aligner groups phrases into windows of ``lookahead_phrases``
-    (default 5), estimates relative TTS duration for each phrase,
-    and distributes the available time proportionally.  Short phrases
-    donate surplus time to longer neighbours.
+    Each phrase gets its subtitle slot PLUS a share of the gap before the next
+    subtitle (when the gap is > inter_phrase_pad_ms). This way Spanish text
+    (usually longer) has room without aggressive time compression.
     """
 
     def __init__(self, config: DubbingConfig) -> None:
         self.cfg = config
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def plan(
+        self,
+        blocks: list[SrtBlock],
+        video_duration_ms: int | None = None,
+    ) -> list[PlannedBlock]:
+        """Return PlannedBlocks with slot + borrowed gap time.
 
-    def plan(self, blocks: list[SrtBlock]) -> list[PlannedBlock]:
-        """Return a list of :class:`PlannedBlock` with allocated durations."""
+        If ``video_duration_ms`` is given, the last phrase borrows the gap up
+        to the end of the video (minus a small tail pad), so the final ES line
+        has room without spilling past the video end.
+        """
         if not blocks:
             return []
 
         planned: list[PlannedBlock] = []
-        window = self.cfg.lookahead_phrases
+        n = len(blocks)
+        pad = self.cfg.inter_phrase_pad_ms
 
-        for group_start in range(0, len(blocks), window):
-            group = blocks[group_start : group_start + window]
-            group_planned = self._plan_group(group)
-            planned.extend(group_planned)
+        for i, block in enumerate(blocks):
+            # Borrow from gap to next subtitle (keep small pad as silence)
+            if i < n - 1:
+                gap_ms = blocks[i + 1].start_ms - block.end_ms
+                borrow_ms = max(0, gap_ms - pad)
+            else:
+                # Last block: borrow whatever remains until the end of the
+                # video so a long ES line has room instead of spilling over.
+                if video_duration_ms is not None:
+                    tail_gap = video_duration_ms - block.end_ms
+                    borrow_ms = max(0, tail_gap - pad)
+                else:
+                    borrow_ms = 0
 
-        return planned
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _plan_group(self, group: list[SrtBlock]) -> list[PlannedBlock]:
-        """Distribute time within one lookahead group."""
-        if not group:
-            return []
-
-        # Total available time for the group:
-        # from the start of the first block to the end of the last block
-        total_available_ms = group[-1].end_ms - group[0].start_ms
-
-        # Estimate relative duration for each phrase
-        estimates = [self._estimate_duration_ms(b.text) for b in group]
-        total_estimated = sum(estimates)
-
-        # Distribute proportionally
-        allocations: list[int] = []
-        if total_estimated > 0:
-            for est in estimates:
-                share = int(total_available_ms * est / total_estimated)
-                share = max(share, self.cfg.min_phrase_duration_ms)
-                allocations.append(share)
-        else:
-            equal = max(
-                total_available_ms // len(group),
+            slot_ms = max(
+                block.duration_ms + borrow_ms,
                 self.cfg.min_phrase_duration_ms,
             )
-            allocations = [equal] * len(group)
 
-        # Build PlannedBlocks with correct start/end positions
-        planned: list[PlannedBlock] = []
-        cursor = group[0].start_ms
-        for i, block in enumerate(group):
-            alloc = allocations[i]
             planned.append(PlannedBlock(
                 text=block.text,
-                target_start_ms=cursor,
-                target_end_ms=cursor + alloc,
-                allocated_ms=alloc,
+                target_start_ms=block.start_ms,
+                target_end_ms=block.start_ms + slot_ms,
+                allocated_ms=slot_ms,
             ))
-            cursor += alloc
 
         return planned
-
-    def _estimate_duration_ms(self, text: str) -> float:
-        """Rough estimate of TTS output duration for *text*.
-
-        Uses ``avg_ms_per_char`` from config (default ~60 ms/char).
-        """
-        if not text:
-            return float(self.cfg.min_phrase_duration_ms)
-        return max(
-            len(text) * self.cfg.avg_ms_per_char,
-            float(self.cfg.min_phrase_duration_ms),
-        )

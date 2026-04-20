@@ -70,6 +70,7 @@ class AudioSeparator:
 
             # Demucs outputs no_vocals.wav for the background stem
             demucs_out = separated_dir / "htdemucs" / temp_audio_name / "no_vocals.wav"
+            vocals_out = separated_dir / "htdemucs" / temp_audio_name / "vocals.wav"
 
             if not demucs_out.exists():
                 raise FileNotFoundError(
@@ -77,6 +78,13 @@ class AudioSeparator:
                 )
 
             shutil.move(str(demucs_out), str(final_bg_path))
+
+            # Save vocals stem for XTTS voice reference (clean speech, no music)
+            vocals_dest = base_folder / f"{name_no_ext}_VOCALS.wav"
+            if vocals_out.exists():
+                shutil.move(str(vocals_out), str(vocals_dest))
+                logger.info("Vocals stem saved to %s", vocals_dest)
+
             logger.info("Background saved to %s", final_bg_path)
             return final_bg_path
 

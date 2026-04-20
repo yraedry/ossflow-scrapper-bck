@@ -1,7 +1,23 @@
-# Specific deps only. torch, torchaudio, transformers, sentencepiece, numpy,
-# pydub, fastapi, uvicorn, sse-starlette, pydantic, httpx already in bjj-base.
-TTS
+# Dubbing-generator deps.
+# Uses Chatterbox Multilingual TTS (Resemble AI, MIT, 23 languages).
+# Chatterbox requires torch 2.6 + transformers 5.2; bjj-base ships 2.5.1 + older
+# transformers, so we upgrade inside this container only (isolated from the
+# subtitle-generator image which keeps the older stack).
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchaudio==2.6.0
+transformers>=5.2.0
+chatterbox-tts>=0.1.7
+resemble-perth>=1.0.1
+# perth.perth_net imports pkg_resources from setuptools. Setuptools 81+
+# removed pkg_resources, which makes PerthImplicitWatermarker silently
+# resolve to None and TTS fails with "'NoneType' object is not callable".
+# Pin <81 until resemble-perth migrates off pkg_resources.
+setuptools<81
+
+# Audio stack
 demucs
+pydub
 
 # Test-only
 pytest>=7.4

@@ -10,6 +10,8 @@ import {
   XCircle,
   Volume2,
   VolumeX,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react'
 import {
   Dialog,
@@ -23,6 +25,35 @@ import { Badge } from '@/components/ui/Badge'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import useAudioAnalysis from '../stores/useAudioAnalysis'
+
+const PAGE_SIZE = 20
+
+function Pager({ page, pageCount, onPage }) {
+  if (pageCount <= 1) return null
+  return (
+    <div className="flex items-center justify-between pt-1 text-xs">
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={page === 0}
+        onClick={() => onPage(Math.max(0, page - 1))}
+      >
+        <ChevronLeft className="h-3 w-3 mr-1" />
+        Anterior
+      </Button>
+      <span className="text-zinc-500">Página {page + 1} / {pageCount}</span>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={page >= pageCount - 1}
+        onClick={() => onPage(Math.min(pageCount - 1, page + 1))}
+      >
+        Siguiente
+        <ChevronRight className="h-3 w-3 ml-1" />
+      </Button>
+    </div>
+  )
+}
 
 function fmtTime(sec) {
   if (sec == null || sec < 0) return '—'
@@ -97,35 +128,56 @@ function GapRow({ gap }) {
   )
 }
 
-function SegmentList({ segments, title, maxShow = 20 }) {
-  const [expanded, setExpanded] = useState(false)
-  const display = expanded ? segments : segments?.slice(0, maxShow)
+function SegmentList({ segments, title }) {
+  const [page, setPage] = useState(0)
   if (!segments?.length) return <p className="text-xs text-zinc-600">Sin segmentos</p>
+  const pageCount = Math.max(1, Math.ceil(segments.length / PAGE_SIZE))
+  const slice = segments.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
 
   return (
     <div>
       <p className="mb-1 text-xs font-medium text-zinc-400">
         {title} ({segments.length})
       </p>
-      <div className="max-h-60 space-y-0.5 overflow-y-auto rounded bg-zinc-900 p-2 text-xs">
-        {display.map((s, i) => (
+      <div className="space-y-0.5 rounded bg-zinc-900 p-2 text-xs">
+        {slice.map((s, i) => (
           <div key={i} className="flex gap-2">
             <span className="shrink-0 font-mono text-zinc-600 w-24">
               {fmtTime(s.start)}–{fmtTime(s.end)}
             </span>
-            <span className="text-zinc-300 truncate">{s.text}</span>
+            <span className="text-zinc-300">{s.text}</span>
           </div>
         ))}
       </div>
-      {segments.length > maxShow && (
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="mt-1 text-[11px] text-blue-400 hover:underline"
-        >
-          {expanded ? 'Mostrar menos' : `Mostrar todos (${segments.length})`}
-        </button>
-      )}
+      <Pager page={page} pageCount={pageCount} onPage={setPage} />
+    </div>
+  )
+}
+
+function DroppedList({ items }) {
+  const [page, setPage] = useState(0)
+  if (!items?.length) return null
+  const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE))
+  const slice = items.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  return (
+    <div>
+      <p className="mb-2 text-sm font-medium text-orange-300">
+        Segmentos descartados por filtros ({items.length})
+      </p>
+      <div className="space-y-0.5 rounded bg-zinc-900 p-2 text-xs">
+        {slice.map((s, i) => (
+          <div key={i} className="flex gap-2 border-b border-zinc-800/60 pb-0.5">
+            <span className="w-24 shrink-0 font-mono text-zinc-500">
+              {fmtTime(s.start)}–{fmtTime(s.end)}
+            </span>
+            <Badge variant="outline" className="h-4 shrink-0 border-orange-500/40 px-1 text-[9px] text-orange-400">
+              {s.reason}
+            </Badge>
+            <span className="text-zinc-400">{s.text}</span>
+          </div>
+        ))}
+      </div>
+      <Pager page={page} pageCount={pageCount} onPage={setPage} />
     </div>
   )
 }
@@ -272,26 +324,7 @@ function AnalysisResults({ data }) {
       </div>
 
       {/* Segmentos descartados por filtros */}
-      {data.segments_dropped?.length > 0 && (
-        <div>
-          <p className="mb-2 text-sm font-medium text-orange-300">
-            Segmentos descartados por filtros ({data.segments_dropped.length})
-          </p>
-          <div className="max-h-64 space-y-0.5 overflow-y-auto rounded bg-zinc-900 p-2 text-xs">
-            {data.segments_dropped.map((s, i) => (
-              <div key={i} className="flex gap-2 border-b border-zinc-800 pb-0.5">
-                <span className="w-24 shrink-0 font-mono text-zinc-500">
-                  {fmtTime(s.start)}–{fmtTime(s.end)}
-                </span>
-                <Badge variant="outline" className="h-4 shrink-0 border-orange-500/40 px-1 text-[9px] text-orange-400">
-                  {s.reason}
-                </Badge>
-                <span className="truncate text-zinc-400">{s.text}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <DroppedList items={data.segments_dropped} />
 
       {/* Segment lists */}
       <div className="grid gap-4 lg:grid-cols-2">
@@ -342,7 +375,7 @@ export default function AudioAnalysisDialog({ open, onOpenChange, videoPath }) {
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-w-6xl w-[95vw] max-h-[92vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Activity className="h-5 w-5 text-blue-400" />

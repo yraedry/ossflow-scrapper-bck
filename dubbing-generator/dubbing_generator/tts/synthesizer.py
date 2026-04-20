@@ -1,9 +1,8 @@
-"""Coqui XTTS v2 wrapper for TTS generation."""
+"""Chatterbox Multilingual TTS wrapper — voice cloning with 23 languages."""
 
 from __future__ import annotations
 
 import logging
-import os
 import tempfile
 from pathlib import Path
 
@@ -15,37 +14,47 @@ logger = logging.getLogger(__name__)
 
 
 class Synthesizer:
-    """Generate speech from text using Coqui XTTS v2.
+    """Generate speech from text using Chatterbox Multilingual TTS.
 
-    Handles long text by splitting at sentence boundaries and
-    cross-fading the resulting chunks.
+    Clones the instructor's voice from a reference WAV and outputs Spanish
+    (or any of 23 supported languages). Handles long text by splitting at
+    sentence boundaries and cross-fading the resulting chunks.
     """
 
     def __init__(self, config: DubbingConfig) -> None:
         self.cfg = config
         self._model = None
+        self._sr: int | None = None
 
     # ------------------------------------------------------------------
     # Model lifecycle
     # ------------------------------------------------------------------
 
     def load_model(self) -> None:
-        """Lazy-load the TTS model onto the best available device."""
+        """Lazy-load the Chatterbox multilingual model onto the best device."""
         if self._model is not None:
             return
 
         import torch
-        from TTS.api import TTS
+        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info("Loading TTS model %s on %s", self.cfg.tts_model_name, device)
-        self._model = TTS(self.cfg.tts_model_name).to(device)
+        logger.info("Loading Chatterbox Multilingual TTS on %s", device)
+        self._model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+        self._sr = int(self._model.sr)
+        logger.info("Chatterbox loaded (sr=%d Hz)", self._sr)
 
     @property
     def model(self):
         if self._model is None:
             self.load_model()
         return self._model
+
+    @property
+    def sample_rate(self) -> int:
+        if self._sr is None:
+            self.load_model()
+        return self._sr  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
     # Public API
@@ -57,10 +66,11 @@ class Synthesizer:
         reference_wav: Path,
         speed: float | None = None,
     ) -> AudioSegment:
-        """Synthesize *text* and return an AudioSegment.
+        """Synthesize *text* with voice cloned from *reference_wav*.
 
-        If *text* exceeds ``tts_char_limit`` it is split and the parts
-        are cross-faded with ``tts_crossfade_ms``.
+        `speed` is mapped to Chatterbox's `cfg_weight` (lower = slower/calmer
+        pacing, higher = tighter delivery). We keep the XTTS-style API so the
+        rest of the pipeline (drift corrector, stretcher) remains untouched.
         """
         if speed is None:
             speed = self.cfg.tts_speed
@@ -75,7 +85,6 @@ class Synthesizer:
         if not segments:
             return AudioSegment.silent(duration=100)
 
-        # Cross-fade consecutive parts
         result = segments[0]
         for seg in segments[1:]:
             xfade = min(self.cfg.tts_crossfade_ms, len(result), len(seg))
@@ -84,11 +93,33 @@ class Synthesizer:
             else:
                 result += seg
 
+        # Normalize to -18 dBFS for consistent loudness across phrases
+        result = self._normalize(result, target_dbfs=-18.0)
         return result
+
+    @staticmethod
+    def _normalize(audio: AudioSegment, target_dbfs: float = -18.0) -> AudioSegment:
+        if audio.dBFS == float("-inf"):
+            return audio
+        delta = target_dbfs - audio.dBFS
+        delta = max(-12.0, min(12.0, delta))
+        return audio.apply_gain(delta)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _speed_to_cfg_weight(self, speed: float) -> float:
+        """Map speed to Chatterbox cfg_weight.
+
+        Docs recomiendan 0.4-0.6 para voz natural. <0.35 desata tanto la
+        prosodia que se oye "pensando" mid-frase (robótico). >0.6 copia
+        cadencia de ref EN. Centrado en 0.45 para ref EN → texto ES.
+        """
+        s = max(0.85, min(1.25, speed))
+        # Linear map: 0.85→0.35, 1.0→0.45, 1.25→0.60
+        cfg = 0.45 + (s - 1.0) * 0.6
+        return max(0.35, min(0.60, cfg))
 
     def _synthesize_chunk(
         self,
@@ -96,41 +127,46 @@ class Synthesizer:
         reference_wav: Path,
         speed: float,
     ) -> AudioSegment:
-        """Synthesize a single short chunk of text."""
+        """Synthesize one short chunk using Chatterbox."""
+        import torchaudio as ta
+
+        cfg_weight = self._speed_to_cfg_weight(speed)
+
+        wav = self.model.generate(
+            text=text,
+            language_id=self.cfg.target_language,
+            audio_prompt_path=str(reference_wav),
+            exaggeration=self.cfg.tts_exaggeration,
+            cfg_weight=cfg_weight,
+            temperature=self.cfg.tts_temperature,
+            repetition_penalty=self.cfg.tts_repetition_penalty,
+            min_p=self.cfg.tts_min_p,
+            top_p=self.cfg.tts_top_p,
+        )
+
         tmp = tempfile.NamedTemporaryFile(
             suffix=".wav", prefix="tts_", delete=False,
         )
         tmp.close()
         try:
-            self.model.tts_to_file(
-                text=text,
-                speaker_wav=str(reference_wav),
-                language=self.cfg.target_language,
-                file_path=tmp.name,
-                speed=speed,
-                split_sentences=False,
-                temperature=self.cfg.tts_temperature,
-            )
+            # Chatterbox returns a torch tensor [channels, samples]; save via torchaudio
+            ta.save(tmp.name, wav, self.sample_rate)
             return AudioSegment.from_wav(tmp.name)
         finally:
-            if os.path.exists(tmp.name):
-                try:
-                    os.remove(tmp.name)
-                except OSError:
-                    pass
+            import os as _os
+            try:
+                _os.remove(tmp.name)
+            except OSError:
+                pass
 
     def _split_long_text(self, text: str, limit: int) -> list[str]:
-        """Split *text* into chunks of at most *limit* characters.
-
-        Tries to split at punctuation or spaces to keep natural phrasing.
-        """
+        """Split text into chunks up to *limit* chars at natural boundaries."""
         if len(text) <= limit:
             return [text]
 
         parts: list[str] = []
         remaining = text
         while len(remaining) > limit:
-            # Find a good split point near the middle-ish of the limit
             best = -1
             for char in [". ", ", ", "; ", " "]:
                 idx = remaining.rfind(char, 0, limit)
@@ -138,12 +174,10 @@ class Synthesizer:
                     best = idx + len(char)
                     break
             if best == -1:
-                best = limit  # hard cut as last resort
-
+                best = limit
             parts.append(remaining[:best].strip())
             remaining = remaining[best:].strip()
 
         if remaining:
             parts.append(remaining)
-
         return parts

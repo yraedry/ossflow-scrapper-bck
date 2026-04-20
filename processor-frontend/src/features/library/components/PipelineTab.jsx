@@ -139,6 +139,7 @@ export default function PipelineTab({ instructional }) {
   const [selected, setSelected] = useState(initialSteps)
   const [voiceProfile, setVoiceProfile] = useState('')
   const [outputDir, setOutputDir] = useState('')
+  const [dubbingScript, setDubbingScript] = useState(true)
 
   useEffect(() => {
     setSelected(initialSteps)
@@ -183,6 +184,9 @@ export default function PipelineTab({ instructional }) {
       const options = {}
       if (voiceProfile) options.voice_profile = voiceProfile
       if (outputDir.trim()) options.output_dir = outputDir.trim()
+      // Iso-synchronous dubbing script (.dub.es.srt) in addition to the literal
+      // subtitle file. Only matters when the translate step runs.
+      options.dubbing_mode = Boolean(dubbingScript)
       const resp = await start.mutateAsync({
         path,
         steps: stepsList,
@@ -282,6 +286,31 @@ export default function PipelineTab({ instructional }) {
               />
             </div>
           </div>
+
+          <label
+            className={cn(
+              'flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors',
+              dubbingScript
+                ? 'border-amber-500/40 bg-amber-500/5'
+                : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700',
+            )}
+          >
+            <Checkbox
+              checked={dubbingScript}
+              onCheckedChange={(v) => setDubbingScript(Boolean(v))}
+              className="mt-0.5"
+            />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm text-zinc-100">
+                Generar guion de doblaje (<code className="font-mono text-xs">.dub.es.srt</code>)
+              </div>
+              <p className="mt-0.5 text-xs text-zinc-500">
+                Versión compactada del ES para que el TTS cuadre con los
+                tiempos del video sin acelerar. El <code className="font-mono">.es.srt</code>{' '}
+                literal (subtítulos) no se toca.
+              </p>
+            </div>
+          </label>
 
           <div className="flex items-center justify-between pt-2">
             <p className="text-xs text-zinc-500">

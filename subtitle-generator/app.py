@@ -55,6 +55,10 @@ class TranslateRequest(BaseModel):
     fallback_provider: str | None = None
     fallback_api_key: str | None = None
     out_path: str | None = None
+    # Dubbing-adapted (iso-synchronous) output instead of literal. Writes
+    # <stem>.dub.es.srt by default so it lives alongside the literal subs.
+    dubbing_mode: bool = False
+    dubbing_cps: float = 16.0
 
 
 class AnalyzeRequest(BaseModel):
@@ -202,6 +206,134 @@ def _build_translator_with_fallback(opts: dict):
     return primary, fb
 
 
+def _clean_base_stem(srt_path: Path) -> str:
+    """Return the video-level stem of an SRT path, stripping language tags.
+
+    Examples:
+      "S01E01 foo.en.srt"  -> "S01E01 foo"
+      "S01E01 foo_EN.srt"  -> "S01E01 foo"
+      "S01E01 foo.srt"     -> "S01E01 foo"
+    """
+    stem = srt_path.stem
+    for tag in (".en", ".EN", "_en", "_EN"):
+        if stem.endswith(tag):
+            return stem[: -len(tag)]
+    return stem
+
+
+def _literal_srt_path_for(srt_path: Path) -> Path:
+    """Return <video-stem>.es.srt sidecar (literal subtitle)."""
+    return srt_path.with_name(f"{_clean_base_stem(srt_path)}.es.srt")
+
+
+def _dub_srt_path_for(srt_path: Path) -> Path:
+    """Return <video-stem>.dub.es.srt sidecar (iso-sync dubbing script)."""
+    return srt_path.with_name(f"{_clean_base_stem(srt_path)}.dub.es.srt")
+
+
+def _words_json_for(srt_path: Path) -> Path:
+    """Return <video>.words.json sibling for a given SRT.
+
+    The SRT may be .en.srt, .srt or already an .es.srt — we always walk back
+    to the base video stem.
+    """
+    return srt_path.with_name(f"{_clean_base_stem(srt_path)}.words.json")
+
+
+def _translate_for_dubbing(
+    primary, srt_path: Path, out_path: Path, cps: float,
+) -> None:
+    """Dubbing translation — industry nivel 3 (speech-anchored) with fallback.
+
+    Strategy:
+      1. If ``<video>.words.json`` exists next to the SRT → re-segment speech
+         by real pauses (dub_segmenter) and build the dub track from there.
+         Timestamps mirror the speaker's breath, not the reading-oriented SRT.
+      2. Otherwise fall back to the old slot-anchored mode (nivel 2): keep
+         original SRT timestamps, just adapt text to its budget.
+
+    Only supported when ``primary`` is OpenAITranslator (budget prompt-based).
+    """
+    from subtitle_generator.srt_io import parse_srt, serialize_srt  # type: ignore
+    from subtitle_generator.translator import OpenAITranslator  # type: ignore
+
+    if not isinstance(primary, OpenAITranslator):
+        raise RuntimeError(
+            "dubbing_mode requires OpenAI provider; DeepL has no budget-aware mode"
+        )
+
+    words_path = _words_json_for(srt_path)
+    if words_path.exists():
+        _translate_for_dubbing_nivel3(primary, words_path, out_path, cps)
+        return
+
+    # Fallback nivel 2 — SRT slots as source of truth.
+    subs = parse_srt(srt_path)
+    if not subs:
+        out_path.write_text("", encoding="utf-8")
+        return
+    items = [
+        {
+            "text": s["text"],
+            "duration_ms": max(
+                100,
+                int((float(s.get("end", 0)) - float(s.get("start", 0))) * 1000),
+            ),
+        }
+        for s in subs
+    ]
+    adapted = primary.translate_for_dubbing(items, cps=cps)
+    if len(adapted) != len(subs):
+        raise RuntimeError(
+            f"dubbing translator returned {len(adapted)} items, expected {len(subs)}"
+        )
+    for sub, new_text in zip(subs, adapted):
+        sub["text"] = new_text
+    out_path.write_text(serialize_srt(subs), encoding="utf-8")
+
+
+def _translate_for_dubbing_nivel3(
+    primary, words_path: Path, out_path: Path, cps: float,
+) -> None:
+    """Speech-anchored dub translation.
+
+    Re-segments speech by real pauses from word-timestamps, then adapts each
+    segment to its own char budget. Writes an SRT whose timestamps mirror
+    the speaker's real rhythm, eliminating the gaps inherited from reading
+    subtitles.
+    """
+    from subtitle_generator.dub_segmenter import (  # type: ignore
+        SegmenterConfig,
+        load_words,
+        segment_speech,
+    )
+    from subtitle_generator.srt_io import serialize_srt  # type: ignore
+
+    words = load_words(words_path)
+    segments = segment_speech(words, SegmenterConfig())
+    if not segments:
+        out_path.write_text("", encoding="utf-8")
+        return
+
+    items = [
+        {"text": s["text"], "duration_ms": s["duration_ms"]}
+        for s in segments
+    ]
+    # Speech-anchored: slots = real talk time, so ES must fill the budget
+    # (not just respect it) or the TTS will leave silence inside speech.
+    adapted = primary.translate_for_dubbing(items, cps=cps, fill_budget=True)
+    if len(adapted) != len(segments):
+        raise RuntimeError(
+            f"dubbing translator returned {len(adapted)} items, expected {len(segments)}"
+        )
+
+    subs = [
+        {"start": seg["start"], "end": seg["end"], "text": text}
+        for seg, text in zip(segments, adapted)
+    ]
+    out_path.write_text(serialize_srt(subs), encoding="utf-8")
+
+
 def _run_translate_directory(req: RunRequest, emit) -> None:
     """Translate every .srt under input_path to *_ES.srt."""
     opts = req.options or {}
@@ -213,16 +345,28 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
         if root.suffix.lower() == ".srt":
             srts = [root]
         else:
-            # Video file — look for the matching .srt next to it
-            candidate = root.with_suffix(".srt")
-            srts = [candidate] if candidate.exists() else []
+            # Video file — look for any sibling EN SRT. WhisperX writes
+            # <stem>.en.srt; legacy outputs may be <stem>.srt.
+            stem = root.stem
+            srts = []
+            for sfx in (".en.srt", ".EN.srt", ".srt"):
+                candidate = root.with_name(f"{stem}{sfx}")
+                if candidate.exists():
+                    srts = [candidate]
+                    break
         root = root.parent
     elif root.is_dir():
         srts = sorted(root.rglob("*.srt"))
     else:
         raise FileNotFoundError(f"input_path not found: {root}")
 
-    srts = [s for s in srts if not s.name.endswith(".es.srt") and not s.stem.endswith("_ES") and not s.stem.endswith("_ESP_DUB")]
+    srts = [
+        s for s in srts
+        if not s.name.endswith(".es.srt")
+        and not s.name.endswith(".dub.es.srt")
+        and not s.stem.endswith("_ES")
+        and not s.stem.endswith("_ESP_DUB")
+    ]
 
     with emit_logs(emit, level=level):
         primary, fallback = _build_translator_with_fallback(opts)
@@ -238,28 +382,55 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
             emit(JobEvent(type="progress", data={"pct": 100}))
             return
 
+        dubbing_mode = bool(opts.get("dubbing_mode"))
+        cps = float(opts.get("dubbing_cps", 16.0))
+        if dubbing_mode:
+            emit(JobEvent(type="log", data={"message":
+                f"dubbing_mode ON (cps={cps}): translations will respect per-slot char budgets"
+            }))
+
         for i, srt in enumerate(srts, 1):
-            out = srt.with_name(f"{srt.stem}.es.srt")
-            if out.exists():
-                emit(JobEvent(type="log", data={"message": f"skip (exists): {out.name}"}))
+            # Both outputs use the video-level stem (no ".en" suffix) so
+            # foo.en.srt -> foo.es.srt and foo.dub.es.srt consistently.
+            sub_out = _literal_srt_path_for(srt)
+            dub_out = _dub_srt_path_for(srt)
+
+            # 1. Literal subtitle translation (skip if already present).
+            if sub_out.exists():
+                emit(JobEvent(type="log", data={"message": f"skip subs (exists): {sub_out.name}"}))
             else:
                 try:
-                    primary.translate_srt(srt, out)
-                    emit(JobEvent(type="log", data={"message": f"translated: {srt.name} -> {out.name}"}))
+                    primary.translate_srt(srt, sub_out)
+                    emit(JobEvent(type="log", data={"message": f"translated subs: {srt.name} -> {sub_out.name}"}))
                 except Exception as exc:
                     emit(JobEvent(type="log", data={"message":
                         f"{provider_name} failed on {srt.name}: {exc}"
                     }))
                     if fallback is not None:
                         try:
-                            fallback.translate_srt(srt, out)
+                            fallback.translate_srt(srt, sub_out)
                             emit(JobEvent(type="log", data={"message":
-                                f"translated via fallback {fb_name}: {srt.name}"
+                                f"translated subs via fallback {fb_name}: {srt.name}"
                             }))
                         except Exception as exc2:
                             emit(JobEvent(type="log", data={"message":
                                 f"ERROR fallback {fb_name} also failed on {srt.name}: {exc2}"
                             }))
+
+            # 2. Dubbing-adapted version (only when enabled). Always derived
+            #    from the source EN srt (not from sub_out) so we don't compound
+            #    translation drift. Regenerates if missing.
+            if dubbing_mode and not dub_out.exists():
+                try:
+                    _translate_for_dubbing(primary, srt, dub_out, cps)
+                    emit(JobEvent(type="log", data={"message": f"translated dub: {srt.name} -> {dub_out.name}"}))
+                except Exception as exc:
+                    emit(JobEvent(type="log", data={"message":
+                        f"{provider_name} dubbing-mode failed on {srt.name}: {exc}"
+                    }))
+            elif dubbing_mode:
+                emit(JobEvent(type="log", data={"message": f"skip dub (exists): {dub_out.name}"}))
+
             pct = int(i * 100 / total)
             emit(JobEvent(type="progress", data={"pct": pct}))
 
@@ -337,7 +508,16 @@ def validate(req: ValidateRequest) -> dict:
 
     srt = _P(req.srt_path)
     if not srt.exists():
-        raise HTTPException(status_code=404, detail=f"SRT no existe: {req.srt_path}")
+        # Fallback: try swapping .srt <-> .en.srt (convention migration)
+        alt = None
+        if srt.name.endswith(".en.srt"):
+            alt = srt.with_name(srt.name[:-len(".en.srt")] + ".srt")
+        elif srt.suffix == ".srt":
+            alt = srt.with_name(srt.stem + ".en.srt")
+        if alt and alt.exists():
+            srt = alt
+        else:
+            raise HTTPException(status_code=404, detail=f"SRT no existe: {req.srt_path}")
     subs = parse_srt(srt)
     report = SubtitleQualityChecker(SubtitleConfig()).check(subs)
     sibling = find_sibling_video(srt)
@@ -439,7 +619,24 @@ def translate(req: TranslateRequest) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    out = _P(req.out_path) if req.out_path else None
+    if req.dubbing_mode:
+        # Iso-sync adaptation → writes a separate .dub.es.srt sidecar by
+        # default, leaving the literal subtitle track untouched.
+        out = _P(req.out_path) if req.out_path else _dub_srt_path_for(srt)
+        try:
+            _translate_for_dubbing(primary, srt, out, req.dubbing_cps)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"{req.provider} (dubbing): {exc}")
+        return {
+            "ok": True,
+            "out_path": str(out),
+            "source": str(srt),
+            "provider": req.provider,
+            "mode": "dubbing",
+        }
+
+    # Default out uses video-level stem so foo.en.srt -> foo.es.srt (no .en).
+    out = _P(req.out_path) if req.out_path else _literal_srt_path_for(srt)
     used = req.provider
     try:
         written = primary.translate_srt(srt, out)

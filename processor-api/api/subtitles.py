@@ -52,6 +52,8 @@ class TranslateBody(BaseModel):
     fallback_provider: Optional[str] = None
     fallback_api_key: Optional[str] = None
     out_path: Optional[str] = None
+    dubbing_mode: bool = False
+    dubbing_cps: Optional[float] = None
 
 
 class AnalyzeBody(BaseModel):
@@ -174,6 +176,11 @@ async def translate(body: TranslateBody) -> dict:
 
     if body.out_path:
         payload["out_path"] = _translate(body.out_path)
+    if body.dubbing_mode:
+        payload["dubbing_mode"] = True
+        cps = body.dubbing_cps or get_setting("translation_dubbing_cps")
+        if cps:
+            payload["dubbing_cps"] = float(cps)
     return await _post("/translate", payload, timeout=600.0)
 
 

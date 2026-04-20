@@ -36,19 +36,38 @@ class VoiceCloner:
         """Return the path to a voice reference WAV.
 
         Priority:
-          1. *override_path* if given (user-supplied voice profile).
+          1. *override_path* if given (e.g. Demucs vocals stem, clean speech).
           2. Model voice if ``use_model_voice`` is True.
           3. Extracted from *video_path* using VAD to pick best segment.
         """
-        if override_path and override_path.exists():
-            logger.info("Using override voice profile: %s", override_path)
-            return override_path
-
+        # Model voice takes priority: if the operator configured a native ES
+        # voice WAV, use it. Cloning the instructor's EN voice yields an ES
+        # output with strong English accent and prosody; a native ES ref fixes
+        # both, at the cost of losing the instructor's original timbre.
         if self.cfg.use_model_voice and self.cfg.model_voice_path:
             model_path = Path(self.cfg.model_voice_path)
             if model_path.exists():
-                logger.info("Using model voice: %s", model_path)
+                logger.info("Using model voice (native ES): %s", model_path)
                 return model_path
+            logger.warning(
+                "use_model_voice set but model_voice_path missing: %s",
+                self.cfg.model_voice_path,
+            )
+
+        if override_path and override_path.exists():
+            # If override is the vocals stem, pick best VAD window and resample
+            # to 24kHz mono for XTTS (same treatment as raw video extraction).
+            logger.info("Using override voice profile: %s", override_path)
+            refined = override_path.with_name(f"{video_path.stem}_ref.wav")
+            if refined.exists():
+                return refined
+            try:
+                start, duration = self._find_best_speech_segment(override_path)
+                self._extract_audio(override_path, start, duration, refined)
+                return refined
+            except Exception as exc:
+                logger.warning("Refining vocals stem failed (%s); using raw stem", exc)
+                return override_path
 
         # Extract from video
         output_wav = video_path.with_name(f"{video_path.stem}_ref.wav")
@@ -158,20 +177,28 @@ class VoiceCloner:
         duration: float,
         output: Path,
     ) -> None:
-        """Extract audio at 24 kHz mono from *video_path*."""
+        """Extract audio at 24 kHz mono with voice-cleanup filters.
+
+        Filters applied:
+          - highpass=80: remove low-frequency rumble
+          - lowpass=8000: remove very high frequencies (focus on voice band)
+          - loudnorm: normalize perceived loudness (EBU R128)
+        """
+        af_chain = "highpass=f=80,lowpass=f=8000,loudnorm=I=-18:TP=-2:LRA=7"
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-ss", str(start),
             "-i", str(video_path),
             "-t", str(duration),
-            "-vn", "-acodec", "pcm_s16le",
+            "-vn",
+            "-af", af_chain,
+            "-acodec", "pcm_s16le",
             "-ar", "24000", "-ac", "1",
             str(output),
         ]
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError:
-            # Fallback: extract from the very beginning
             logger.warning("Extraction at t=%.1f failed; trying t=0", start)
             cmd[4] = "0"
             subprocess.run(cmd, check=True)

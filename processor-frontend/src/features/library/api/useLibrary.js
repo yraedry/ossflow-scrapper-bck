@@ -17,12 +17,22 @@ export function useLibrary() {
   return useQuery({
     queryKey: qk.library.list(),
     queryFn: async () => {
-      const data = await http.get('/library')
-      if (Array.isArray(data)) return data
-      return data?.instructionals || data?.items || []
+      // refresh=1 kicks a background rescan on the backend (non-blocking)
+      // and returns the current cache immediately. Returns a tuple so the
+      // UI can poll faster while a refresh is in flight.
+      const data = await http.get('/library?refresh=1')
+      if (Array.isArray(data)) return { items: data, refreshing: false }
+      return {
+        items: data?.instructionals || data?.items || [],
+        refreshing: Boolean(data?.refreshing),
+      }
     },
-    staleTime: 30_000,
+    select: (d) => d?.items || [],
+    staleTime: 5_000,
+    // Poll fast while backend reports a refresh in progress, otherwise idle.
+    refetchInterval: (q) => (q?.state?.data?.refreshing ? 2_000 : 60_000),
     refetchOnWindowFocus: true,
+    refetchOnMount: true,
   })
 }
 
@@ -147,6 +157,17 @@ export function useUploadPoster() {
   })
 }
 
+export function useRedownloadPoster() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ name }) => http.post(`/library/${enc(name)}/poster/redownload`),
+    onSuccess: (_d, { name }) => {
+      qc.invalidateQueries({ queryKey: qk.library.detail(name) })
+      qc.invalidateQueries({ queryKey: qk.library.list() })
+    },
+  })
+}
+
 export function useUpdateMetadata() {
   const qc = useQueryClient()
   return useMutation({
@@ -160,4 +181,15 @@ export function useUpdateMetadata() {
 
 export function posterUrl(name) {
   return `/api/library/${enc(name)}/poster`
+}
+
+export function useVoiceProfiles() {
+  return useQuery({
+    queryKey: ['dubbing', 'voices'],
+    queryFn: async () => {
+      const data = await http.get('/dubbing/voices')
+      return Array.isArray(data?.voices) ? data.voices : []
+    },
+    staleTime: 60_000,
+  })
 }
