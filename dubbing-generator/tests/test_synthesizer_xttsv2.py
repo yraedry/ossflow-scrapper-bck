@@ -136,3 +136,27 @@ def test_generate_empty_text_returns_short_silence(tmp_path):
     audio = synth.generate("", ref)
     assert len(audio) > 0
     assert len(audio) <= 200
+
+
+def test_build_synthesizer_xttsv2_default():
+    from dubbing_generator.tts import build_synthesizer
+    cfg = DubbingConfig()
+    synth = build_synthesizer(cfg)
+    assert isinstance(synth, SynthesizerXTTSv2)
+
+
+def test_build_synthesizer_chatterbox_fallback():
+    from dubbing_generator.tts import build_synthesizer
+    from dubbing_generator.tts.synthesizer import Synthesizer
+    cfg = DubbingConfig()
+    cfg.tts_engine = "chatterbox"
+    synth = build_synthesizer(cfg)
+    assert isinstance(synth, Synthesizer)
+
+
+def test_build_synthesizer_unknown_engine_raises():
+    from dubbing_generator.tts import build_synthesizer
+    cfg = DubbingConfig()
+    cfg.tts_engine = "nope"
+    with pytest.raises(ValueError, match="tts_engine"):
+        build_synthesizer(cfg)
