@@ -46,3 +46,14 @@ def test_custom_overrides():
     cfg = DubbingConfig(tts_speed=1.0, max_compression_ratio=1.3)
     assert cfg.tts_speed == 1.0
     assert cfg.max_compression_ratio == 1.3
+
+
+def test_xtts_defaults():
+    cfg = DubbingConfig()
+    assert cfg.tts_engine == "xttsv2"
+    assert cfg.xtts_model_name == "tts_models/multilingual/multi-dataset/xtts_v2"
+    assert cfg.xtts_config_path == ""
+    assert cfg.xtts_checkpoint_dir == ""
+    assert cfg.xtts_use_deepspeed is False
+    assert cfg.xtts_code_switching is True
+    assert cfg.xtts_en_terms_extra == ()
