@@ -52,3 +52,87 @@ def test_latent_cache_misses_when_mtime_changes(tmp_path):
 
     synth._get_latents(ref)
     assert synth._model.get_conditioning_latents.call_count == 2
+
+
+import numpy as np
+import torch
+from pydub import AudioSegment
+
+
+def _fake_inference_result(duration_s: float = 0.5) -> dict:
+    samples = int(duration_s * _XTTS_SAMPLE_RATE_FOR_TESTS)
+    return {"wav": np.zeros(samples, dtype=np.float32)}
+
+
+_XTTS_SAMPLE_RATE_FOR_TESTS = 24000
+
+
+def _install_model_mock(synth: SynthesizerXTTSv2) -> MagicMock:
+    model = MagicMock()
+    model.get_conditioning_latents.return_value = (object(), object())
+    model.inference.return_value = _fake_inference_result(0.4)
+    synth._model = model
+    synth._sr = _XTTS_SAMPLE_RATE_FOR_TESTS
+    return model
+
+
+def test_generate_mono_spanish_single_inference(tmp_path):
+    cfg = DubbingConfig()
+    cfg.xtts_code_switching = False
+    synth = SynthesizerXTTSv2(cfg)
+    model = _install_model_mock(synth)
+
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"RIFFxxxxWAVEfmt ")
+
+    audio = synth.generate("hola mundo", ref, speed=1.0)
+
+    assert isinstance(audio, AudioSegment)
+    assert model.inference.call_count == 1
+    _, kwargs = model.inference.call_args
+    assert kwargs["language"] == "es"
+    assert kwargs["temperature"] == cfg.tts_temperature
+    assert kwargs["repetition_penalty"] == cfg.tts_repetition_penalty
+    assert kwargs["top_p"] == cfg.tts_top_p
+    assert kwargs["speed"] == 1.0
+
+
+def test_generate_code_switching_splits_by_language(tmp_path):
+    cfg = DubbingConfig()
+    cfg.xtts_code_switching = True
+    synth = SynthesizerXTTSv2(cfg)
+    model = _install_model_mock(synth)
+
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"RIFFxxxxWAVEfmt ")
+
+    synth.generate("aplicamos un two on one desde la guard", ref)
+
+    langs = [call.kwargs["language"] for call in model.inference.call_args_list]
+    assert langs == ["es", "en", "es", "en"]
+
+
+def test_generate_uses_default_speed_from_config(tmp_path):
+    cfg = DubbingConfig()
+    synth = SynthesizerXTTSv2(cfg)
+    model = _install_model_mock(synth)
+
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"RIFFxxxxWAVEfmt ")
+
+    synth.generate("hola", ref)
+
+    assert model.inference.call_args.kwargs["speed"] == cfg.tts_speed
+
+
+def test_generate_empty_text_returns_short_silence(tmp_path):
+    cfg = DubbingConfig()
+    synth = SynthesizerXTTSv2(cfg)
+    _install_model_mock(synth)
+
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"RIFFxxxxWAVEfmt ")
+
+    audio = synth.generate("", ref)
+    assert len(audio) > 0
+    assert len(audio) <= 200

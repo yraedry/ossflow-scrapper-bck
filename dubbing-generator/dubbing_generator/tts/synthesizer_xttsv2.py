@@ -108,4 +108,120 @@ class SynthesizerXTTSv2:
         reference_wav: Path,
         speed: float | None = None,
     ) -> AudioSegment:
-        raise NotImplementedError("Implemented in Task 5")
+        """Synthesize *text* cloning voice from *reference_wav*."""
+        if not text.strip():
+            return AudioSegment.silent(duration=100)
+
+        if speed is None:
+            speed = self.cfg.tts_speed
+
+        _ = self.model  # lazy-load
+        gpt_cond, spk_emb = self._get_latents(reference_wav)
+
+        if self.cfg.xtts_code_switching:
+            spans = split_by_language(text, self._en_terms)
+        else:
+            spans = [("es", text)]
+
+        segments: list[AudioSegment] = []
+        for lang, span in spans:
+            if not span.strip():
+                continue
+            for chunk in self._split_long_text(span, self.cfg.tts_char_limit):
+                seg = self._synthesize_chunk(chunk, lang, gpt_cond, spk_emb, speed)
+                if len(seg) > 0:
+                    segments.append(seg)
+
+        if not segments:
+            return AudioSegment.silent(duration=100)
+
+        result = segments[0]
+        for seg in segments[1:]:
+            xfade = min(self.cfg.tts_crossfade_ms, len(result), len(seg))
+            if xfade > 0:
+                result = result.append(seg, crossfade=xfade)
+            else:
+                result += seg
+
+        return self._normalize(result, target_dbfs=-18.0)
+
+    def _synthesize_chunk(
+        self,
+        text: str,
+        language: str,
+        gpt_cond,
+        spk_emb,
+        speed: float,
+    ) -> AudioSegment:
+        """Synthesize one language-homogeneous chunk and return an AudioSegment."""
+        import numpy as np
+        import torch
+
+        try:
+            out = self._model.inference(
+                text,
+                language=language,
+                gpt_cond_latents=gpt_cond,
+                speaker_embedding=spk_emb,
+                temperature=self.cfg.tts_temperature,
+                repetition_penalty=self.cfg.tts_repetition_penalty,
+                top_p=self.cfg.tts_top_p,
+                speed=speed,
+            )
+        except Exception:
+            logger.exception(
+                "XTTS inference failed for %s span (%d chars); substituting silence",
+                language, len(text),
+            )
+            return AudioSegment.silent(duration=200)
+
+        wav = out["wav"]
+        # Normalise to a flat float32 numpy array regardless of input type
+        if isinstance(wav, torch.Tensor):
+            samples: np.ndarray = wav.cpu().float().numpy().flatten()
+        else:
+            samples = np.asarray(wav, dtype=np.float32).flatten()
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", prefix="xtts_", delete=False)
+        tmp.close()
+        try:
+            import soundfile as sf
+            sf.write(tmp.name, samples, self.sample_rate, subtype="PCM_16")
+            return AudioSegment.from_wav(tmp.name)
+        finally:
+            import os as _os
+            try:
+                _os.remove(tmp.name)
+            except OSError:
+                pass
+
+    def _split_long_text(self, text: str, limit: int) -> list[str]:
+        """Split text into chunks up to *limit* chars at natural boundaries."""
+        if len(text) <= limit:
+            return [text]
+
+        parts: list[str] = []
+        remaining = text
+        while len(remaining) > limit:
+            best = -1
+            for ch in [". ", ", ", "; ", " "]:
+                idx = remaining.rfind(ch, 0, limit)
+                if idx != -1:
+                    best = idx + len(ch)
+                    break
+            if best == -1:
+                best = limit
+            parts.append(remaining[:best].strip())
+            remaining = remaining[best:].strip()
+
+        if remaining:
+            parts.append(remaining)
+        return parts
+
+    @staticmethod
+    def _normalize(audio: AudioSegment, target_dbfs: float = -18.0) -> AudioSegment:
+        if audio.dBFS == float("-inf"):
+            return audio
+        delta = target_dbfs - audio.dBFS
+        delta = max(-12.0, min(12.0, delta))
+        return audio.apply_gain(delta)
