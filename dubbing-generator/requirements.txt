@@ -18,6 +18,10 @@ setuptools<81
 # Audio stack
 demucs
 pydub
+soundfile>=0.12
+# librosa powers the QA boundary report (spectral centroid + pyin F0).
+# Soft dep of the qa module — if missing the sidecar falls back to MOS-only.
+librosa>=0.10.1
 
 # Test-only
 pytest>=7.4

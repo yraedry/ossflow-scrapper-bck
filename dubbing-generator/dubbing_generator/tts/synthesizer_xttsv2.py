@@ -160,9 +160,9 @@ class SynthesizerXTTSv2:
         try:
             out = self._model.inference(
                 text,
-                language=language,
-                gpt_cond_latents=gpt_cond,
-                speaker_embedding=spk_emb,
+                language,
+                gpt_cond,
+                spk_emb,
                 temperature=self.cfg.tts_temperature,
                 repetition_penalty=self.cfg.tts_repetition_penalty,
                 top_p=self.cfg.tts_top_p,

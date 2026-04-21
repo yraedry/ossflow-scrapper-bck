@@ -89,8 +89,8 @@ def test_generate_mono_spanish_single_inference(tmp_path):
 
     assert isinstance(audio, AudioSegment)
     assert model.inference.call_count == 1
-    _, kwargs = model.inference.call_args
-    assert kwargs["language"] == "es"
+    args, kwargs = model.inference.call_args
+    assert args[1] == "es"  # language is positional arg #2
     assert kwargs["temperature"] == cfg.tts_temperature
     assert kwargs["repetition_penalty"] == cfg.tts_repetition_penalty
     assert kwargs["top_p"] == cfg.tts_top_p
@@ -108,7 +108,7 @@ def test_generate_code_switching_splits_by_language(tmp_path):
 
     synth.generate("aplicamos un two on one desde la guard", ref)
 
-    langs = [call.kwargs["language"] for call in model.inference.call_args_list]
+    langs = [call.args[1] for call in model.inference.call_args_list]
     assert langs == ["es", "en", "es", "en"]
 
 
