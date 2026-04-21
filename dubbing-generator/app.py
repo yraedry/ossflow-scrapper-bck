@@ -290,13 +290,13 @@ def _run_synthesis_probe(video_path: Path, planned: list, cfg, max_phrases=None)
     from dubbing_generator.audio.separator import AudioSeparator
     from dubbing_generator.audio.stretcher import stretch_audio
     from dubbing_generator.sync.drift_corrector import DriftCorrector
-    from dubbing_generator.tts.synthesizer import Synthesizer
+    from dubbing_generator.tts import build_synthesizer
     from dubbing_generator.tts.voice_cloner import VoiceCloner
     from pydub import AudioSegment
 
     separator = AudioSeparator(cfg)
     cloner = VoiceCloner(cfg)
-    synth = Synthesizer(cfg)
+    synth = build_synthesizer(cfg)
     drift = DriftCorrector(cfg)
     drift.reset()
 

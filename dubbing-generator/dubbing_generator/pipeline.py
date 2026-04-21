@@ -17,7 +17,7 @@ from .audio.separator import AudioSeparator
 from .audio.stretcher import stretch_audio
 from .sync.aligner import SrtBlock, SyncAligner
 from .sync.drift_corrector import DriftCorrector
-from .tts.synthesizer import Synthesizer
+from .tts import build_synthesizer
 from .tts.voice_cloner import VoiceCloner
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ class DubbingPipeline:
 
         self.separator = AudioSeparator(config)
         self.voice_cloner = VoiceCloner(config)
-        self.synthesizer = Synthesizer(config)
+        self.synthesizer = build_synthesizer(config)
         self.aligner = SyncAligner(config)
         self.drift = DriftCorrector(config)
         self.mixer = AudioMixer(config)
