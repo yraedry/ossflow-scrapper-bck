@@ -6,6 +6,7 @@ to the source file.
 
 from __future__ import annotations
 
+import abc
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Any, Iterable, Protocol
 
 import httpx
 
@@ -354,11 +355,11 @@ ES: "Usa el butterfly hook para hacer el sweep."
 """
 
 
-class _BaseChatTranslator(_BaseTranslator):
+class _BaseChatTranslator(_BaseTranslator, abc.ABC):
     """Shared logic for chat-completion-style providers (OpenAI, Ollama).
 
-    Subclases implementan 4 métodos abstractos para diferenciar dialecto HTTP.
-    El cuerpo de retry/feedback/prompts queda compartido aquí.
+    Subclasses implement 4 abstract methods that diverge per provider dialect.
+    The retry/feedback/prompt-construction body is shared here.
     """
 
     # Number of subtitle items per request. 40 is a sweet spot:
@@ -368,23 +369,52 @@ class _BaseChatTranslator(_BaseTranslator):
     _BATCH_SIZE = 40
     _MAX_RETRIES = 2
 
-    # Subclases setean estos en __init__:
-    model: str
-    temperature: float
-    provider_label: str
-
-    # ---- API HTTP a implementar por subclases ----
+    # ---- HTTP dialect — subclasses MUST implement ----
+    @abc.abstractmethod
     def _endpoint_url(self) -> str:
-        raise NotImplementedError
+        """Return the absolute chat-completion endpoint URL for the provider."""
+        ...
 
-    def _request_headers(self) -> dict:
-        raise NotImplementedError
+    @abc.abstractmethod
+    def _request_headers(self) -> dict[str, str]:
+        """Return the HTTP headers (auth + content-type) for the provider."""
+        ...
 
-    def _wrap_chat_body(self, messages: list[dict], json_mode: bool) -> dict:
-        raise NotImplementedError
+    @abc.abstractmethod
+    def _wrap_chat_body(self, messages: list[dict[str, Any]], json_mode: bool) -> dict[str, Any]:
+        """Build the provider-specific HTTP request body for a chat completion.
 
-    def _extract_message_content(self, resp_json: dict) -> str:
-        raise NotImplementedError
+        Args:
+            messages: list of ``{"role": ..., "content": ...}`` dicts.
+            json_mode: if True, instruct the provider to enforce strict JSON
+                output (OpenAI: ``response_format={"type":"json_object"}``;
+                Ollama: ``format="json"``). Subclasses may ignore the flag if
+                their provider does not support strict JSON, but must document
+                the deviation.
+
+        Returns:
+            Body dict ready for ``httpx.Client.post(json=...)``.
+        """
+        ...
+
+    @abc.abstractmethod
+    def _extract_message_content(self, resp_json: dict[str, Any]) -> str:
+        """Pull the assistant message text out of a parsed provider response."""
+        ...
+
+    # ---- Optional hook (default to module-level timeout) ----
+    def _request_timeout(self) -> float:
+        """Override per-provider HTTP timeout. Default = module-level ``_TIMEOUT`` (120s).
+
+        Hook reserved for subclasses. The current implementation of
+        ``_post_with_retry`` reads the timeout from the module-level
+        ``_TIMEOUT`` constant, so overriding this method has no effect today.
+        Override + a future task that wires this into the post helper is
+        required before tuning per-provider timeouts. Ollama local with
+        qwen2.5-7b can take 30-120s for large batches; OpenAI gpt-4o-mini
+        typically <5s.
+        """
+        return _TIMEOUT
 
     # ---- Lógica compartida ----
     def translate_texts(self, texts: list[str]) -> list[str]:
