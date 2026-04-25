@@ -92,7 +92,7 @@ def _resolve_input(path: Path) -> Path:
 def _run_subtitle_generator(req: RunRequest, emit) -> None:
     """Bridge RunRequest -> subtitle_generator.pipeline.SubtitlePipeline.
 
-    When ``options.translate_only=True`` runs SRT translation (EN→ES via DeepL)
+    When ``options.translate_only=True`` runs SRT translation (EN→ES via Ollama/OpenAI)
     instead of transcription — reusing the same job/SSE contract.
     """
     opts = req.options or {}
@@ -163,19 +163,15 @@ def _run_subtitle_generator(req: RunRequest, emit) -> None:
 def _build_translator_with_fallback(opts: dict):
     """Build (primary, fallback) translators from job options.
 
-    Primary provider defaults to ``openai``. Fallback is used only if the
-    primary raises at translate time. Fallback key is read from
-    ``fallback_api_key`` or, for deepl fallback, ``DEEPL_API_KEY`` env.
+    Primary provider defaults to ``ollama``. Fallback is used only if the
+    primary raises at translate time. Ollama no necesita api_key.
     """
     from subtitle_generator.translator import make_translator  # type: ignore
 
-    provider = (opts.get("provider") or "openai").lower()
+    provider = (opts.get("provider") or "ollama").lower()
     primary_key = opts.get("api_key")
-    if not primary_key:
-        if provider == "openai":
-            primary_key = os.environ.get("OPENAI_API_KEY")
-        elif provider == "deepl":
-            primary_key = os.environ.get("DEEPL_API_KEY")
+    if not primary_key and provider == "openai":
+        primary_key = os.environ.get("OPENAI_API_KEY")
 
     primary = make_translator(
         provider,
@@ -190,11 +186,8 @@ def _build_translator_with_fallback(opts: dict):
     fb = None
     if fb_name and fb_name != provider:
         fb_key = opts.get("fallback_api_key")
-        if not fb_key:
-            if fb_name == "openai":
-                fb_key = os.environ.get("OPENAI_API_KEY")
-            elif fb_name == "deepl":
-                fb_key = os.environ.get("DEEPL_API_KEY")
+        if not fb_key and fb_name == "openai":
+            fb_key = os.environ.get("OPENAI_API_KEY")
         try:
             fb = make_translator(
                 fb_name,
@@ -265,11 +258,11 @@ def _translate_for_dubbing(
     Only supported when ``primary`` is OpenAITranslator (budget prompt-based).
     """
     from subtitle_generator.srt_io import parse_srt, serialize_srt  # type: ignore
-    from subtitle_generator.translator import OpenAITranslator  # type: ignore
+    from subtitle_generator.translator import _BaseChatTranslator  # type: ignore
 
-    if not isinstance(primary, OpenAITranslator):
+    if not isinstance(primary, _BaseChatTranslator):
         raise RuntimeError(
-            "dubbing_mode requires OpenAI provider; DeepL has no budget-aware mode"
+            "dubbing_mode requires a chat-based translator (Ollama or OpenAI)"
         )
 
     words_path = _words_json_for(srt_path)
