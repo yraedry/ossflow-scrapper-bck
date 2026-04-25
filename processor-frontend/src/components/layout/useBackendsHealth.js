@@ -5,6 +5,7 @@ export const BACKENDS = [
   { id: 'chapter-splitter', label: 'Chapter Splitter' },
   { id: 'subtitle-generator', label: 'Subtitle Generator' },
   { id: 'dubbing-generator', label: 'Dubbing Generator' },
+  { id: 'ollama', label: 'Ollama' },
 ]
 
 export function useBackendsHealth() {

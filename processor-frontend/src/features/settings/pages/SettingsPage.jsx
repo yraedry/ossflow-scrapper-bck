@@ -50,6 +50,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useTheme } from '@/components/theme-provider'
+import { useBackendsHealth } from '@/components/layout/useBackendsHealth'
 import { useSettings, useUpdateSettings } from '@/features/settings/api/useSettings'
 import { useMount, useMountStatus } from '@/features/settings/api/useMount'
 import { useProviders } from '@/features/oracle/api/useOracle'
@@ -1008,8 +1009,21 @@ function TranslationSection({ settings }) {
   const { isDirty } = form.formState
   const hasOpenAI = !!(settings?.openai_api_key)
 
+  const backends = useBackendsHealth()
+  const ollamaStatus = backends.find((b) => b.id === 'ollama')?.status
+  const showOllamaWarning = provider === 'ollama' && ollamaStatus === 'down'
+
   return (
     <form onSubmit={form.handleSubmit(onSubmit)}>
+      {showOllamaWarning && (
+        <div className="mb-4 rounded-md border border-yellow-500/50 bg-yellow-500/10 p-3 text-sm">
+          <p className="font-medium">Ollama no está respondiendo</p>
+          <p className="mt-1 text-muted-foreground">
+            El modelo se está descargando (~4.5 GB la primera vez) o el servicio no arrancó.
+            Mientras tanto puedes cambiar a OpenAI en el selector.
+          </p>
+        </div>
+      )}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
