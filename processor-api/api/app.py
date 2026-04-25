@@ -112,8 +112,13 @@ def _auto_mount_on_startup() -> None:
         media = Path(MEDIA_ROOT)
         media.mkdir(parents=True, exist_ok=True)
 
-        # Skip if already mounted
-        result = subprocess.run(["mountpoint", "-q", str(media)], capture_output=True)
+        # Skip if already mounted. Timeout defensivo: si el mount está "zombie"
+        # (CIFS colgado), ``mountpoint`` se queda estancado llamando stat() y
+        # bloqueaba todo el arranque del contenedor.
+        result = subprocess.run(
+            ["mountpoint", "-q", str(media)],
+            capture_output=True, timeout=5,
+        )
         if result.returncode == 0:
             return
 
@@ -129,6 +134,15 @@ async def lifespan(app: FastAPI):
     # Startup
     _load_persisted_jobs()
     _auto_mount_on_startup()
+    # Re-attach to ElevenLabs jobs that were mid-flight when we last
+    # stopped. Done after _load_persisted_jobs so the _jobs registry is
+    # populated; before yield so resume tasks start concurrently with
+    # normal request handling.
+    try:
+        from api.elevenlabs_dubbing import resume_orphan_jobs
+        resume_orphan_jobs()
+    except Exception as exc:
+        log.warning("elevenlabs resume_orphan_jobs failed: %s", exc)
     yield
     # Shutdown: cerrar httpx.AsyncClient compartido del módulo preflight
     try:
@@ -167,6 +181,7 @@ from api.burn_subs import router as burn_subs_router  # noqa: E402
 from api.health_proxy import router as health_proxy_router  # noqa: E402
 from api.subtitles import router as subtitles_router  # noqa: E402
 from api.dubbing import router as dubbing_router  # noqa: E402
+from api.elevenlabs_dubbing import router as elevenlabs_dubbing_router  # noqa: E402
 # WIRE_ORACLE_ROUTER
 from api import oracle as oracle_module  # noqa: E402
 # WIRE_TELEGRAM_ROUTER
@@ -189,6 +204,7 @@ app.include_router(burn_subs_router)
 app.include_router(health_proxy_router)
 app.include_router(subtitles_router)
 app.include_router(dubbing_router)
+app.include_router(elevenlabs_dubbing_router)
 # WIRE_ORACLE_ROUTER
 app.include_router(oracle_module.router)
 # WIRE_TELEGRAM_ROUTER
@@ -252,8 +268,26 @@ def scan_library(root_path: str) -> list[dict]:
     instructionals: dict[str, dict] = {}
 
     for dirpath, dirnames, filenames in os.walk(root):
+        # Skip artefact subfolders — mutating ``dirnames`` in place
+        # short-circuits ``os.walk`` so we never descend into them.
+        # ``elevenlabs/`` holds Studio E2E MP4s and ``doblajes/`` holds
+        # the flujo-B pipeline output. Both would otherwise show up as
+        # bogus "Seasons" with duplicated episode names.
+        dirnames[:] = [
+            d for d in dirnames
+            if d.lower() not in ("elevenlabs", "doblajes")
+        ]
+
         dp = Path(dirpath)
-        videos = sorted(f for f in filenames if Path(f).suffix.lower() in VIDEO_EXTENSIONS)
+        # Exclude dubbed outputs. Match both ``name_DOBLADO.ext`` and
+        # ``name_DOBLADO_<suffix>.ext`` — the backup/comparison flow
+        # used to produce ``_DOBLADO_B_v5.mkv`` etc., which slipped
+        # through the old endswith("_DOBLADO") filter.
+        videos = sorted(
+            f for f in filenames
+            if Path(f).suffix.lower() in VIDEO_EXTENSIONS
+            and "_DOBLADO" not in Path(f).stem
+        )
         if not videos:
             continue
 
@@ -299,7 +333,15 @@ def scan_library(root_path: str) -> list[dict]:
                 or (dp / f"{base}_ES.srt").exists()
                 or (dp / f"{base}_ESP_DUB.srt").exists()
             )
-            has_dubbed = any((dp / f"{base}{sfx}").exists() for sfx in ["_DOBLADO.mkv", "_DOBLADO.mp4"])
+            # Dub present if either:
+            #   - legacy: <name>_DOBLADO.mkv/mp4 next to source (old XTTS)
+            #   - flujo B v5: <Season>/doblajes/<name>.mkv
+            #   - Studio E2E: <Season>/elevenlabs/<name>.mp4
+            has_dubbed = (
+                any((dp / f"{base}{sfx}").exists() for sfx in ["_DOBLADO.mkv", "_DOBLADO.mp4"])
+                or (dp / "doblajes" / f"{base}.mkv").exists()
+                or (dp / "elevenlabs" / vf).exists()
+            )
             is_chapter = bool(re.search(r"S\d{2}E\d{2}", vf))
 
             try:
@@ -405,6 +447,28 @@ def _infer_event_type(data: dict) -> str:
     if "progress" in data:
         return "progress"
     return "log"
+
+
+async def _parse_json_body(request: Request) -> dict:
+    """Parse a JSON body, raising 400 on invalid payloads.
+
+    Motivación: ``await request.json()`` levanta ``JSONDecodeError`` si el
+    cliente manda JSON mal formado, y FastAPI lo transforma en 500 opaco
+    que no dice QUÉ se rompió. Además, si el body es un array o un
+    literal (``"hello"``, ``42``), el código siguiente accede con
+    ``body.get(...)`` y levanta ``AttributeError`` → también 500.
+    Normalizamos a dict y devolvemos 400 con mensaje claro.
+    """
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expected JSON object, got {type(body).__name__}",
+        )
+    return body
 
 
 async def _emit(job_id: str, data: dict):
@@ -620,7 +684,7 @@ async def index(request: Request):
 
 @app.post("/api/scan")
 async def api_scan(request: Request):
-    body = await request.json()
+    body = await _parse_json_body(request)
     root_path = body.get("path", "")
 
     # E6: fall back to library_path from settings if no path provided
@@ -990,6 +1054,7 @@ async def api_library_detail(name: str, refresh: bool = True):
         "path": inst_path,
         "has_poster": bool(match.get("has_poster")),
         "poster_filename": match.get("poster_filename"),
+        "poster_mtime": match.get("poster_mtime"),
         "videos": videos,
     }
 
@@ -1106,10 +1171,17 @@ async def api_mount_status():
     if not media.exists():
         return {"mounted": False, "share": None}
 
-    # Check if it's a mount point
+    # Check if it's a mount point. Timeout defensivo contra mounts CIFS
+    # zombies — sin esto el endpoint bloqueaba al worker entero.
     import subprocess
-    result = subprocess.run(["mountpoint", "-q", str(media)], capture_output=True)
-    is_mount = result.returncode == 0
+    try:
+        result = subprocess.run(
+            ["mountpoint", "-q", str(media)],
+            capture_output=True, timeout=5,
+        )
+        is_mount = result.returncode == 0
+    except subprocess.TimeoutExpired:
+        is_mount = False
 
     dirs = [d.name for d in media.iterdir() if d.is_dir()] if media.exists() else []
     return {"mounted": is_mount, "path": str(media), "directories": len(dirs), "items": dirs[:20]}
@@ -1245,7 +1317,7 @@ async def api_thumbnail(path: str, t: float = 5.0):
 
 @app.post("/api/jobs")
 async def api_create_job(request: Request):
-    body = await request.json()
+    body = await _parse_json_body(request)
     job_type = body.get("type")  # "chapters", "subtitles", "translate", "dubbing"
     video_path = body.get("path")
 
@@ -1360,7 +1432,7 @@ async def api_embed_chapters(request: Request):
     """Embed chapter metadata into an MKV file."""
     from chapter_tools.mkv_chapters import MkvChapterGenerator
 
-    body = await request.json()
+    body = await _parse_json_body(request)
     video_path = body.get("path", "")
     chapters = body.get("chapters", [])
 
@@ -1432,7 +1504,7 @@ async def api_create_voice_profile(request: Request):
     """Extract and save a voice profile for an instructor."""
     from voice_profiles.manager import VoiceProfileManager
 
-    body = await request.json()
+    body = await _parse_json_body(request)
     video_path = body.get("video_path", "")
     instructor = body.get("instructor", "")
     start_sec = float(body.get("start_sec", 60))
@@ -1490,7 +1562,7 @@ async def api_build_search_index(request: Request):
     """Build or rebuild the subtitle search index."""
     from search.indexer import SubtitleIndexer
 
-    body = await request.json()
+    body = await _parse_json_body(request)
     root_dir = body.get("path", "")
 
     if not root_dir:
@@ -1635,7 +1707,7 @@ async def api_export_to_ossflow(request: Request):
     """Export an instructional to the OssFlow backend."""
     from ossflow_client.client import OssFlowClient, OssFlowConfig
 
-    body = await request.json()
+    body = await _parse_json_body(request)
     root_dir = body.get("path", "")
     instructor = body.get("instructor", "")
     base_url = body.get("base_url", "http://localhost:8080")
@@ -1681,7 +1753,7 @@ async def api_export_plex(request: Request):
     """Export processed videos in Plex-compatible format."""
     from chapter_tools.plex_exporter import PlexExporter
 
-    body = await request.json()
+    body = await _parse_json_body(request)
     instructional_name = body.get("name", "")
     chapters = body.get("chapters", [])
     source_dir = body.get("source_dir", "")

@@ -8,7 +8,7 @@
 #   - processor-frontend:  React 18 UI             → :3000
 #   - chapter-splitter:    OCR + split (GPU)       → :8001
 #   - subtitle-generator:  WhisperX (GPU)          → :8002
-#   - dubbing-generator:   Coqui XTTS v2 (GPU)     → :8003
+#   - dubbing-generator:   ElevenLabs cloud TTS    → :8003
 #
 # Variables:
 #   LIBRARY_PATH  → ruta host con los instruccionales (default /mnt/library)
@@ -49,6 +49,9 @@ services:
       - SUBS_URL=http://subtitle-generator:8002
       - DUBBING_URL=http://dubbing-generator:8003
       - TELEGRAM_FETCHER_URL=http://telegram-fetcher:8004
+      # ElevenLabs Dubbing Studio E2E (api/elevenlabs_dubbing.py). Empty
+      # unless the user enables the frontend "Procesar con ElevenLabs" flow.
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
     depends_on:
       chapter-splitter:
         condition: service_healthy
@@ -187,9 +190,14 @@ services:
       - TORCH_HOME=/models/torch
       - HF_HOME=/models/huggingface
       - XDG_CACHE_HOME=/models/cache
-      # Empty by default → pipeline clones instructor voice (may carry accent).
-      # Set to e.g. /voices/narrador_es.wav to force native ES prosody.
+      # Empty by default → la voz se selecciona desde la UI (metadatos del
+      # instruccional). Override global opcional si quieres forzar una voz
+      # fija para toda la biblioteca: DUBBING_MODEL_VOICE_PATH=/voices/X.wav.
       - DUBBING_MODEL_VOICE_PATH=${DUBBING_MODEL_VOICE_PATH:-}
+      # ElevenLabs cloud TTS backend. API key obligatoria.
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      # Optional global default engine. Settings web override wins.
+      - DUBBING_TTS_ENGINE=${DUBBING_TTS_ENGINE:-}
     networks:
       - bjj_net
     healthcheck:

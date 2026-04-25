@@ -43,13 +43,32 @@ _DEFAULTS: dict[str, Any] = {
     "deepl_api_key": None,
     "openai_api_key": None,
     "translation_provider": "openai",
-    "translation_model": "gpt-4o-mini",
+    "translation_model": "gpt-4o",
     "translation_fallback_provider": "deepl",
     # Industry-standard iso-synchronous translation: the translator compacts
     # each ES line to fit the SRT slot so TTS comes out on-time without audio
     # stretch. Only works with OpenAI provider (budget-aware prompt).
     "translation_dubbing_mode": True,
-    "translation_dubbing_cps": 16.0,   # chars/sec: 16 fills slots with small overshoot that stretch absorbs (14 left silence)
+    "translation_dubbing_cps": 17.0,   # R12: 17 (antes 13). Con tts_engine=elevenlabs la prosodia cloud aguanta densidad Netflix-grade (17 cps es el estándar ES profesional). XTTS requería 13 porque su speed=1.05 fijo no absorbía texto largo sin sonar robótico; ElevenLabs multilingual_v2 pronuncia a cadencia natural y deja el stretcher del pipeline para ajustes finos de slot. Para volver a XTTS, bajar a 13.
+    # Motor TTS: "elevenlabs" (cloud, voice cloning, paid) o "piper"
+    # (local ONNX, voz preset ES, gratis, sin cloning).
+    "tts_engine": "elevenlabs",
+    # voice_id pre-registrado en ElevenLabs (PVC o IVC). Ignorado si tts_engine != "elevenlabs".
+    "elevenlabs_voice_id": "",
+    "elevenlabs_model_id": "eleven_multilingual_v2",
+    # Path al modelo Piper ONNX (dentro del contenedor dubbing-generator).
+    # Default = es_ES-sharvard-medium baked into the image.
+    "piper_model_path": "/models/piper/es_ES-sharvard-medium.onnx",
+    # Voz Kokoro-82M (preset ES masculina). Alternativa: em_santa.
+    "kokoro_voice": "em_alex",
+    # OpenAI post-process for the English SRT produced by WhisperX.
+    # Cleans syllable-duplication artifacts and broken mid-clause boundaries
+    # while preserving timestamps and block count. Uses openai_api_key.
+    "subtitle_postprocess_openai": True,
+    # gpt-4o (antes gpt-4o-mini) — el mini no detecta errores de WhisperX
+    # tipo "butterflip" por "butterfly". 4o tiene criterio de glosario.
+    # Coste marginal: ~1 request por episodio, ~300 tokens in/out.
+    "subtitle_postprocess_model": "gpt-4o",
     "author_aliases": {},
 }
 
@@ -93,9 +112,16 @@ def _maybe_import_legacy_json() -> None:
 
 
 def load_settings() -> dict[str, Any]:
-    """Return settings merged with defaults."""
+    """Return settings merged with defaults.
+
+    Usa ``deepcopy`` porque ``_DEFAULTS`` contiene dicts anidados (p.ej.
+    ``processing_defaults.chapters``). Con una copia superficial, mutar el
+    dict devuelto contaminaba los defaults compartidos entre requests — un
+    bug típico de singleton con estado mutable.
+    """
+    import copy
     _ensure_initialized()
-    merged = dict(_DEFAULTS)
+    merged = copy.deepcopy(_DEFAULTS)
     try:
         with session_scope() as s:
             for row in s.query(Setting).all():
@@ -160,6 +186,20 @@ async def put_settings(request: Request):
     if "voice_profile_default" in body:
         current["voice_profile_default"] = body["voice_profile_default"]
 
+    if "translation_dubbing_cps" in body:
+        # Chars-per-second target para la traducción iso-síncrona.
+        # Rango razonable: 12-18. Más bajo = texto ES más compacto
+        # (el LLM reescribe manteniendo significado) → cabe mejor en
+        # el slot EN. Más alto = traducción más literal pero puede
+        # desbordar al dub.
+        tc = body["translation_dubbing_cps"]
+        if not isinstance(tc, (int, float)) or not (8 <= tc <= 25):
+            return JSONResponse(
+                {"error": "translation_dubbing_cps must be number in [8, 25]"},
+                status_code=422,
+            )
+        current["translation_dubbing_cps"] = float(tc)
+
     if "processing_defaults" in body:
         pd = body["processing_defaults"]
         if not isinstance(pd, dict):
@@ -211,11 +251,61 @@ async def put_settings(request: Request):
                 cleaned[k2] = v2
         current["author_aliases"] = cleaned
 
+    if "subtitle_postprocess_openai" in body:
+        v = body["subtitle_postprocess_openai"]
+        if not isinstance(v, bool):
+            return JSONResponse({"error": "subtitle_postprocess_openai must be a boolean"}, status_code=422)
+        current["subtitle_postprocess_openai"] = v
+
+    if "subtitle_postprocess_model" in body:
+        v = body["subtitle_postprocess_model"]
+        if v is not None and not isinstance(v, str):
+            return JSONResponse({"error": "subtitle_postprocess_model must be a string or null"}, status_code=422)
+        current["subtitle_postprocess_model"] = v.strip() if isinstance(v, str) else v
+
     if "custom_prompts" in body:
         cp = body["custom_prompts"]
         if not isinstance(cp, dict):
             return JSONResponse({"error": "custom_prompts must be a JSON object"}, status_code=422)
         current["custom_prompts"] = cp
+
+    if "tts_engine" in body:
+        te = body["tts_engine"]
+        if not isinstance(te, str) or te.strip().lower() not in ("elevenlabs", "piper", "kokoro"):
+            return JSONResponse(
+                {"error": "tts_engine must be 'elevenlabs', 'piper' or 'kokoro'"},
+                status_code=422,
+            )
+        current["tts_engine"] = te.strip().lower()
+
+    if "elevenlabs_voice_id" in body:
+        v = body["elevenlabs_voice_id"]
+        if v is not None and not isinstance(v, str):
+            return JSONResponse({"error": "elevenlabs_voice_id must be a string or null"}, status_code=422)
+        current["elevenlabs_voice_id"] = v.strip() if isinstance(v, str) else v
+
+    if "elevenlabs_model_id" in body:
+        v = body["elevenlabs_model_id"]
+        if v is not None and not isinstance(v, str):
+            return JSONResponse({"error": "elevenlabs_model_id must be a string or null"}, status_code=422)
+        current["elevenlabs_model_id"] = v.strip() if isinstance(v, str) else v
+
+    if "piper_model_path" in body:
+        v = body["piper_model_path"]
+        if v is not None and not isinstance(v, str):
+            return JSONResponse({"error": "piper_model_path must be a string or null"}, status_code=422)
+        current["piper_model_path"] = v.strip() if isinstance(v, str) else v
+
+    if "kokoro_voice" in body:
+        v = body["kokoro_voice"]
+        if v is not None and not isinstance(v, str):
+            return JSONResponse({"error": "kokoro_voice must be a string or null"}, status_code=422)
+        if isinstance(v, str) and v.strip() and v.strip() not in ("em_alex", "em_santa"):
+            return JSONResponse(
+                {"error": "kokoro_voice must be 'em_alex' or 'em_santa'"},
+                status_code=422,
+            )
+        current["kokoro_voice"] = v.strip() if isinstance(v, str) else v
 
     save_settings(current)
     return current
