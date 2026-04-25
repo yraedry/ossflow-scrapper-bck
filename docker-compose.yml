@@ -243,6 +243,35 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: bjj-ollama
+    restart: unless-stopped
+    networks:
+      - bjj_net
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+      - ./ollama/entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      - OLLAMA_KEEP_ALIVE=2m
+      - OLLAMA_HOST=0.0.0.0:11434
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:11434/api/tags | grep -q qwen2.5:7b-instruct-q4_K_M"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 1200s
+
 volumes:
   config-data:
   bjj-db:
@@ -253,6 +282,7 @@ volumes:
   model-cache:
   tg-session:
   tg-cache:
+  ollama-models:
   nas-library:
     driver: local
     driver_opts:
