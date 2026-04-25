@@ -617,7 +617,7 @@ async def run_translation(job: JobInfo):
 
     ci, co = _translate_job_path(job.video_path)
 
-    provider = (get_setting("translation_provider") or "openai").lower()
+    provider = (get_setting("translation_provider") or "ollama").lower()
     fallback = (get_setting("translation_fallback_provider") or "").lower() or None
     model = get_setting("translation_model")
 
@@ -633,8 +633,7 @@ async def run_translation(job: JobInfo):
 
     key = (
         get_setting("openai_api_key") if provider == "openai"
-        else get_setting("deepl_api_key") if provider == "deepl"
-        else None
+        else None  # ollama no necesita key
     )
     if key:
         topts["api_key"] = key
@@ -642,11 +641,10 @@ async def run_translation(job: JobInfo):
     if fallback and fallback != provider:
         fb_key = (
             get_setting("openai_api_key") if fallback == "openai"
-            else get_setting("deepl_api_key") if fallback == "deepl"
-            else None
+            else None  # ollama no necesita key
         )
+        topts["fallback_provider"] = fallback
         if fb_key:
-            topts["fallback_provider"] = fallback
             topts["fallback_api_key"] = fb_key
 
     payload = {
