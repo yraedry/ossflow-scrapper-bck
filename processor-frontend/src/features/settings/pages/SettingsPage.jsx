@@ -125,11 +125,10 @@ const telegramSchema = z.object({
 })
 
 const translationSchema = z.object({
-  translation_provider: z.enum(['openai', 'deepl']).default('openai'),
+  translation_provider: z.enum(['ollama', 'openai']).default('ollama'),
   translation_model: z.string().optional(),
-  translation_fallback_provider: z.enum(['', 'openai', 'deepl']).optional(),
+  translation_fallback_provider: z.enum(['', 'ollama', 'openai']).optional(),
   openai_api_key: z.string().optional(),
-  deepl_api_key: z.string().optional(),
 })
 
 const SECTIONS = [
@@ -959,23 +958,33 @@ function TelegramSection({ settings }) {
   )
 }
 
+const OLLAMA_MODELS = ['qwen2.5:7b-instruct-q4_K_M', 'qwen2.5:14b-instruct-q4_K_M']
+const OPENAI_MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1']
+
 function TranslationSection({ settings }) {
   const updateMut = useUpdateSettings()
   const [showOpenAI, setShowOpenAI] = useState(false)
-  const [showDeepL, setShowDeepL] = useState(false)
 
   const form = useForm({
     resolver: zodResolver(translationSchema),
     defaultValues: {
-      translation_provider: settings?.translation_provider || 'openai',
-      translation_model: settings?.translation_model || 'gpt-4o-mini',
-      translation_fallback_provider: settings?.translation_fallback_provider || '',
+      translation_provider: settings?.translation_provider || 'ollama',
+      translation_model: settings?.translation_model || 'qwen2.5:7b-instruct-q4_K_M',
+      translation_fallback_provider: settings?.translation_fallback_provider || 'openai',
       openai_api_key: settings?.openai_api_key || '',
-      deepl_api_key: settings?.deepl_api_key || '',
     },
   })
 
   const provider = form.watch('translation_provider')
+
+  useEffect(() => {
+    const current = form.getValues('translation_model')
+    if (provider === 'ollama' && !OLLAMA_MODELS.includes(current)) {
+      form.setValue('translation_model', 'qwen2.5:7b-instruct-q4_K_M', { shouldDirty: true })
+    } else if (provider === 'openai' && !OPENAI_MODELS.includes(current)) {
+      form.setValue('translation_model', 'gpt-4o-mini', { shouldDirty: true })
+    }
+  }, [provider, form])
 
   const onSubmit = async (values) => {
     try {
@@ -988,7 +997,6 @@ function TranslationSection({ settings }) {
         translation_model: raw(values.translation_model),
         translation_fallback_provider: values.translation_fallback_provider || null,
         openai_api_key: raw(values.openai_api_key),
-        deepl_api_key: raw(values.deepl_api_key),
       })
       toast.success('Traducción guardada')
       form.reset(values)
@@ -999,8 +1007,6 @@ function TranslationSection({ settings }) {
 
   const { isDirty } = form.formState
   const hasOpenAI = !!(settings?.openai_api_key)
-  const hasDeepL = !!(settings?.deepl_api_key)
-  const deeplIsFree = (settings?.deepl_api_key || '').endsWith(':fx')
 
   return (
     <form onSubmit={form.handleSubmit(onSubmit)}>
@@ -1016,7 +1022,7 @@ function TranslationSection({ settings }) {
             )}
           </CardTitle>
           <CardDescription>
-            Motor de traducción de subtítulos EN → ES. OpenAI (gpt-4o-mini) por defecto, DeepL como fallback.
+            Ollama local (qwen2.5-7b) por defecto, OpenAI como fallback opt-in.
             Términos BJJ (guard, mount, armbar…) se mantienen en inglés.
           </CardDescription>
         </CardHeader>
@@ -1030,8 +1036,8 @@ function TranslationSection({ settings }) {
               >
                 <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="openai">OpenAI (gpt-4o-mini)</SelectItem>
-                  <SelectItem value="deepl">DeepL</SelectItem>
+                  <SelectItem value="ollama">Ollama (local, gratis)</SelectItem>
+                  <SelectItem value="openai">OpenAI (cloud, pago)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -1045,17 +1051,30 @@ function TranslationSection({ settings }) {
               >
                 <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__none__">Sin fallback</SelectItem>
-                  <SelectItem value="openai">OpenAI</SelectItem>
-                  <SelectItem value="deepl">DeepL</SelectItem>
+                  <SelectItem value="__none__">Ninguno</SelectItem>
+                  <SelectItem value="ollama">Ollama (local)</SelectItem>
+                  <SelectItem value="openai">OpenAI (cloud)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
 
-          {provider === 'openai' && (
-            <div>
-              <Label htmlFor="translation_model">Modelo OpenAI</Label>
+          <div>
+            <Label htmlFor="translation_model">Modelo</Label>
+            {provider === 'ollama' ? (
+              <Select
+                value={form.watch('translation_model') || 'qwen2.5:7b-instruct-q4_K_M'}
+                onValueChange={(v) => form.setValue('translation_model', v, { shouldDirty: true })}
+              >
+                <SelectTrigger id="translation_model" className="mt-1.5 font-mono">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="qwen2.5:7b-instruct-q4_K_M">qwen2.5:7b-instruct-q4_K_M (default, ~4.5 GB VRAM)</SelectItem>
+                  <SelectItem value="qwen2.5:14b-instruct-q4_K_M">qwen2.5:14b-instruct-q4_K_M (~9 GB VRAM, mejor calidad)</SelectItem>
+                </SelectContent>
+              </Select>
+            ) : (
               <Select
                 value={form.watch('translation_model') || 'gpt-4o-mini'}
                 onValueChange={(v) => form.setValue('translation_model', v, { shouldDirty: true })}
@@ -1064,17 +1083,14 @@ function TranslationSection({ settings }) {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="gpt-4o-mini">gpt-4o-mini (económico)</SelectItem>
-                  <SelectItem value="gpt-4o">gpt-4o (mejor calidad, ~10× más caro)</SelectItem>
+                  <SelectItem value="gpt-4o-mini">gpt-4o-mini</SelectItem>
+                  <SelectItem value="gpt-4o">gpt-4o</SelectItem>
                   <SelectItem value="gpt-4.1-mini">gpt-4.1-mini</SelectItem>
                   <SelectItem value="gpt-4.1">gpt-4.1</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground mt-1">
-                <code>gpt-4o-mini</code> recomendado (~$0.03/Season). <code>gpt-4o</code> mejor para dubbing fill_budget si ves count mismatch.
-              </p>
-            </div>
-          )}
+            )}
+          </div>
 
           <div>
             <Label htmlFor="openai_api_key" className="flex items-center gap-2">
@@ -1110,40 +1126,6 @@ function TranslationSection({ settings }) {
             </p>
           </div>
 
-          <div>
-            <Label htmlFor="deepl_api_key" className="flex items-center gap-2">
-              DeepL API Key
-              {hasDeepL && (
-                <Badge variant="outline" className="border-emerald-500/40 text-emerald-500">
-                  {deeplIsFree ? 'Free' : 'Pro'}
-                </Badge>
-              )}
-            </Label>
-            <div className="relative mt-1.5">
-              <Input
-                id="deepl_api_key"
-                type={showDeepL ? 'text' : 'password'}
-                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx"
-                autoComplete="off"
-                {...form.register('deepl_api_key')}
-                className="font-mono pr-10"
-              />
-              <button
-                type="button"
-                onClick={() => setShowDeepL((v) => !v)}
-                aria-label={showDeepL ? 'Ocultar key' : 'Mostrar key'}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              >
-                {showDeepL ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">
-              <a href="https://www.deepl.com/pro-api" target="_blank" rel="noopener noreferrer" className="underline hover:text-primary">
-                deepl.com/pro-api
-              </a>
-              . Free: 500k caracteres/mes.
-            </p>
-          </div>
         </CardContent>
         <Separator />
         <div className="flex justify-end gap-2 p-4">
