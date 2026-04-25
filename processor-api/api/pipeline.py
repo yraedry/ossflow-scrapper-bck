@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -366,7 +367,7 @@ def _client_and_payload(
     if step_name == "translate":
         from api.settings import get_setting
 
-        provider = (options.get("provider") or get_setting("translation_provider") or "openai").lower()
+        provider = (options.get("provider") or get_setting("translation_provider") or "ollama").lower()
         fallback = (
             options.get("fallback_provider")
             or get_setting("translation_fallback_provider")
@@ -403,8 +404,7 @@ def _client_and_payload(
 
         key = options.get("api_key") or (
             get_setting("openai_api_key") if provider == "openai"
-            else get_setting("deepl_api_key") if provider == "deepl"
-            else None
+            else None  # ollama no necesita key
         )
         if key:
             topts["api_key"] = key
@@ -412,8 +412,7 @@ def _client_and_payload(
         if fallback and fallback != provider:
             fb_key = options.get("fallback_api_key") or (
                 get_setting("openai_api_key") if fallback == "openai"
-                else get_setting("deepl_api_key") if fallback == "deepl"
-                else None
+                else None  # ollama no necesita key
             )
             if fb_key:
                 topts["fallback_provider"] = fallback
@@ -940,6 +939,30 @@ async def flush_gpu():
             pass
 
     return JSONResponse({"ok": False, "message": "subtitle-generator did not recover in 60s"}, status_code=503)
+
+
+@router.post("/flush-ollama")
+async def flush_ollama() -> dict:
+    """Descarga el modelo de Ollama de VRAM al instante.
+
+    Útil entre fases del pipeline secuencial: tras translate, antes de Kokoro,
+    para liberar VRAM (~4.5 GB con qwen2.5:7b-Q4) y evitar OOM.
+    """
+    import httpx
+
+    from api.settings import get_setting
+
+    model = get_setting("translation_model") or "qwen2.5:7b-instruct-q4_K_M"
+    base = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{base}/api/chat",
+                json={"model": model, "messages": [], "keep_alive": 0, "stream": False},
+            )
+        return {"ok": r.status_code < 400, "status": r.status_code}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @router.get("/eta")
