@@ -1,19 +1,26 @@
 # Dubbing-generator deps.
-# Uses Coqui XTTS-v2 (Idiap fork of coqui-ai/TTS, MPL-2.0 code, CPML weights).
-# Chatterbox synthesizer file remains on disk as rollback but requires a manual
-# install of chatterbox-tts/transformers>=5.2 to re-enable.
+# TTS: ElevenLabs cloud (voice_id pre-registered in dashboard).
+# XTTS-v2 eliminado — usaba coqui-tts + transformers + ~8-10GB de modelos.
 --extra-index-url https://download.pytorch.org/whl/cu124
 torch==2.6.0
 torchaudio==2.6.0
-coqui-tts>=0.27.0
 
-# Audio stack
+# Audio stack — demucs (GPU) separa voz/fondo para el Flujo B v5.
 demucs
 pydub
 soundfile>=0.12
 # librosa powers the QA boundary report (spectral centroid + pyin F0).
 # Soft dep of the qa module — if missing the sidecar falls back to MOS-only.
 librosa>=0.10.1
+
+# Cloud TTS backend.
+elevenlabs>=1.0
+
+# Local TTS backend (Piper, ONNX, CPU).
+piper-tts
+
+# Local TTS backend (Kokoro-82M, StyleTTS2, GPU/CPU).
+kokoro>=0.9.4
 
 # Test-only
 pytest>=7.4

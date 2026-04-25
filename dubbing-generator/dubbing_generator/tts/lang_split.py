@@ -19,10 +19,15 @@ def split_by_language(
     """
     if not text:
         return []
-    if not en_terms:
+    # Filtrar términos vacíos: una cadena "" en el set produciría un
+    # pattern `\b(?:|...)\b` que matchea cadena vacía en cada posición
+    # → bucle infinito en finditer. Defensivo: un usuario mal
+    # configurado no debería colgar el servicio.
+    clean_terms = [t for t in en_terms if t]
+    if not clean_terms:
         return [("es", text)]
 
-    sorted_terms = sorted(en_terms, key=len, reverse=True)
+    sorted_terms = sorted(clean_terms, key=len, reverse=True)
     pattern = re.compile(
         r"\b(?:" + "|".join(re.escape(t) for t in sorted_terms) + r")\b",
         re.IGNORECASE,

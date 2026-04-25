@@ -19,11 +19,14 @@ from pathlib import Path
 class SegmenterConfig:
     """Thresholds for grouping words into speech segments."""
 
-    # Pause >= this opens a new segment. 250 ms = tight dub breath.
-    # Shorter → more short segments (more breath points, smaller residual
-    # gaps when ES is shorter than EN). 350 ms leaves long slots (5-7 s) that
-    # amplify the ES/EN compression gap and produce audible mid-speech silence.
-    min_pause_ms: int = 250
+    # Pause >= this opens a new segment. 450 ms = mid-ground between
+    # fluency and sync: each TTS render carries more words, so prosody
+    # arcs across them instead of restarting every 2-3 words. 250 ms
+    # over-fragmented for XTTS (61 segments on a 158-s clip → 46 hard
+    # cuts because every boundary restarts timbre). 450 typically
+    # lands around ~35 segments, with arcs long enough to sound like
+    # continuous speech without missing real coach pauses.
+    min_pause_ms: int = 450
     # Hard cap per segment. Chatterbox char_limit is 260; 220 keeps headroom
     # for the ES adaptation (usually 10-20% longer than EN).
     max_chars: int = 220

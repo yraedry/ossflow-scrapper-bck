@@ -35,12 +35,20 @@ class AudioSeparator:
 
         logger.info("Separating audio with Demucs (htdemucs two-stems=vocals)...")
 
-        temp_audio_name = "temp_demucs_input"
+        # Paths UNIQUE by stem + random suffix: sin esto dos dubs del
+        # MISMO folder corriendo en paralelo colisionan — ambos escriben
+        # a ``temp_demucs_input.wav`` y ``separated/htdemucs/.../``, el
+        # cleanup de uno borra los archivos del otro → FileNotFoundError.
+        # Reproducido con jobs E01/E02/E03 en paralelo (ronda 10).
+        import uuid as _uuid
+        unique = f"{name_no_ext}_{_uuid.uuid4().hex[:8]}"
+        temp_audio_name = f"temp_demucs_{unique}"
         temp_audio_wav = base_folder / f"{temp_audio_name}.wav"
-        separated_dir = base_folder / "separated"
+        separated_dir = base_folder / f"separated_{unique}"
 
         try:
-            # Extract raw audio from the video
+            # Extract raw audio from the video. 10 min de timeout para
+            # vídeos muy largos (instruccionales de 1h+) con codec pesado.
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -49,9 +57,12 @@ class AudioSeparator:
                     str(temp_audio_wav),
                 ],
                 check=True,
+                timeout=600,
             )
 
-            # Run Demucs
+            # Run Demucs. Sin timeout: en CPU un vídeo de 40 min puede
+            # tardar >20 min, y cortar por timeout dejaría archivos
+            # parciales. Confiamos en que el usuario monitorice.
             result = subprocess.run(
                 [
                     "demucs", "-n", "htdemucs",

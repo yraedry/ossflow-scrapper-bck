@@ -108,11 +108,15 @@ class SubtitleWriter:
         line1 = " ".join(words[:best_break])
         line2 = " ".join(words[best_break:])
 
-        # If either line still exceeds limit, truncate at last complete word
-        if len(line1) > max_chars:
-            line1 = line1[:max_chars].rsplit(" ", 1)[0]
-        if len(line2) > max_chars:
-            line2 = line2[:max_chars].rsplit(" ", 1)[0]
+        # If either line still exceeds limit, truncate at last complete word.
+        # rsplit(" ", 1)[0] sobre un string SIN espacios devuelve "" — una
+        # palabra larga sin espacios (compuestos o URLs) se perdería entera.
+        # _truncate_at_word usa split en espacios y va quitando palabras del
+        # final hasta caber; si al final no queda nada, hace fallback a un
+        # hard cut para al menos mostrar caracteres en lugar de la cadena
+        # vacía silenciosa que borraba el subtítulo.
+        line1 = _truncate_at_word(line1, max_chars)
+        line2 = _truncate_at_word(line2, max_chars)
 
         return f"{line1}\n{line2}"
 
@@ -165,3 +169,26 @@ class SubtitleWriter:
                 end_ts = format_timestamp(sub["end"])
                 f.write(f"{idx}\n{start_ts} --> {end_ts}\n{sub['text']}\n\n")
         log.info("Wrote %d subtitle blocks to %s", len(subtitles), output_path.name)
+
+
+def _truncate_at_word(line: str, max_chars: int) -> str:
+    """Truncate ``line`` to ``max_chars`` at a word boundary.
+
+    Fallback robusto frente al bug clásico ``s[:n].rsplit(" ",1)[0]`` que
+    devolvía "" cuando la porción truncada no contenía ningún espacio
+    (palabra única demasiado larga). Ahora:
+
+    * Si la línea ya entra, se devuelve tal cual.
+    * Si hay espacios, se eliminan palabras enteras del final hasta caber.
+    * Si no queda nada (toda la línea es una única palabra muy larga),
+      se aplica un hard cut a ``max_chars`` en vez de devolver "" — mejor
+      un subtítulo truncado que un subtítulo vacío.
+    """
+    if len(line) <= max_chars:
+        return line
+    words = line.split()
+    while words and len(" ".join(words)) > max_chars:
+        words.pop()
+    if words:
+        return " ".join(words)
+    return line[:max_chars]

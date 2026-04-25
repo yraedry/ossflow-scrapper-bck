@@ -150,6 +150,11 @@ class SubtitlePipeline:
         # real pauses instead of inheriting reading-oriented SRT slots.
         self._write_words_json(all_words, video_path)
 
+        # 7c. Optional OpenAI post-process — cleans WhisperX artifacts
+        # (syllable duplication, broken boundaries) without touching timing.
+        if self.t_config.postprocess_openai:
+            subtitles = self._postprocess_srt(subtitles, output_srt)
+
         # 8. Validate
         self.validator.validate(subtitles, audio_duration)
 
@@ -373,6 +378,53 @@ class SubtitlePipeline:
 
         return recovered
 
+    def _postprocess_srt(self, subtitles: list[dict], srt_path: Path) -> list[dict]:
+        """Run OpenAI cleanup and rewrite the SRT file in place.
+
+        Preserves timestamps and block count. On any failure returns the
+        original subtitles so the SRT on disk is always valid.
+        """
+        from .srt_postprocess import SrtPostprocessor
+        from .utils import format_timestamp
+
+        try:
+            pp = SrtPostprocessor(
+                api_key=self.t_config.postprocess_api_key,
+                model=self.t_config.postprocess_model,
+            )
+        except ValueError as exc:
+            log.warning("  Postprocess disabled: %s", exc)
+            return subtitles
+
+        log.info("  Postprocessing SRT with OpenAI (%s)...", self.t_config.postprocess_model)
+        try:
+            cleaned = pp.clean_subtitles(subtitles)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("  Postprocess failed: %s — keeping original SRT", exc)
+            return subtitles
+
+        if len(cleaned) != len(subtitles):
+            log.warning(
+                "  Postprocess returned %d blocks vs %d — keeping original",
+                len(cleaned), len(subtitles),
+            )
+            return subtitles
+
+        changed = sum(
+            1 for a, b in zip(subtitles, cleaned)
+            if a.get("text") != b.get("text")
+        )
+        log.info("  Postprocess cleaned %d/%d blocks", changed, len(cleaned))
+
+        with open(srt_path, "w", encoding="utf-8") as f:
+            for idx, sub in enumerate(cleaned, 1):
+                f.write(
+                    f"{idx}\n"
+                    f"{format_timestamp(sub['start'])} --> {format_timestamp(sub['end'])}\n"
+                    f"{sub['text']}\n\n"
+                )
+        return cleaned
+
     def _write_words_json(self, words: list[dict], video_path: Path) -> None:
         """Dump word-level timestamps as <video>.words.json.
 
@@ -482,9 +534,15 @@ class SubtitlePipeline:
             torch.cuda.empty_cache()
 
     def process_directory(self, root_dir: Path, force: bool = False) -> None:
-        """Walk directory tree and process all matching video files."""
+        """Walk directory tree and process all matching video files.
+
+        Excluye subcarpetas de outputs (``doblajes``, ``elevenlabs``) — si no,
+        WhisperX encuentra los .mkv doblados y les genera .en.srt espurios.
+        """
+        _EXCLUDED_DIR_NAMES = {"doblajes", "elevenlabs"}
         video_files: list[Path] = []
-        for dirpath, _dirnames, filenames in os.walk(root_dir):
+        for dirpath, dirnames, filenames in os.walk(root_dir):
+            dirnames[:] = [d for d in dirnames if d.lower() not in _EXCLUDED_DIR_NAMES]
             for fname in sorted(filenames):
                 if fname.lower().endswith(EXTENSIONES):
                     video_files.append(Path(dirpath) / fname)

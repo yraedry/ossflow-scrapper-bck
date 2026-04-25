@@ -97,17 +97,21 @@ def _validate_payload(data: Any) -> dict[str, Any]:
 
 @router.get("/{name}/metadata")
 async def get_metadata(name: str):
+    import copy
     target = _resolve_target(name)
     sidecar = target / SIDECAR_NAME
+    # deepcopy → ``DEFAULT_METADATA["tags"]`` es una list compartida; si el
+    # cliente la muta (o se cachea) alterábamos el default global. Misma razón
+    # que en settings.load_settings.
     if not sidecar.exists():
-        return JSONResponse(dict(DEFAULT_METADATA))
+        return JSONResponse(copy.deepcopy(DEFAULT_METADATA))
     try:
         raw = json.loads(sidecar.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return JSONResponse(dict(DEFAULT_METADATA))
+        return JSONResponse(copy.deepcopy(DEFAULT_METADATA))
 
     # Merge with defaults to guarantee stable shape.
-    result = dict(DEFAULT_METADATA)
+    result = copy.deepcopy(DEFAULT_METADATA)
     if isinstance(raw, dict):
         for k in DEFAULT_METADATA:
             if k in raw:

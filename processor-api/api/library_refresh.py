@@ -61,7 +61,15 @@ def _video_flags(video_path: Path) -> dict[str, Any]:
         or (folder / f"{base}_ES.srt").exists()
         or (folder / f"{base}_ESP_DUB.srt").exists()
     )
-    has_dubbed = any((folder / f"{base}{sfx}").exists() for sfx in _DUB_SUFFIXES)
+    # Dub present if any of:
+    #   - legacy XTTS:  <name>_DOBLADO.mkv/mp4 next to source
+    #   - flujo B v5:   <folder>/doblajes/<name>.mkv
+    #   - Studio E2E:   <folder>/elevenlabs/<source.ext>
+    has_dubbed = (
+        any((folder / f"{base}{sfx}").exists() for sfx in _DUB_SUFFIXES)
+        or (folder / "doblajes" / f"{base}.mkv").exists()
+        or (folder / "elevenlabs" / video_path.name).exists()
+    )
     try:
         size_mb = round(video_path.stat().st_size / (1024 * 1024), 1)
     except OSError:
@@ -97,6 +105,13 @@ def refresh_instructional_flags(item: dict[str, Any]) -> dict[str, Any]:
     poster = find_poster(folder)
     item["has_poster"] = poster is not None
     item["poster_filename"] = poster.name if poster else None
+    if poster is not None:
+        try:
+            item["poster_mtime"] = int(poster.stat().st_mtime)
+        except OSError:
+            item["poster_mtime"] = None
+    else:
+        item["poster_mtime"] = None
 
     videos = item.get("videos") or []
     fresh_videos: list[dict[str, Any]] = []
@@ -109,6 +124,10 @@ def refresh_instructional_flags(item: dict[str, Any]) -> dict[str, Any]:
             continue
         vp = Path(vp_str)
         if not vp.exists():
+            continue
+        # Drop stale `*_DOBLADO.mkv/mp4` entries left in cache from previous
+        # scans (before the filter was added to scan_library).
+        if vp.stem.endswith("_DOBLADO"):
             continue
         v.update(_video_flags(vp))
         fresh_videos.append(v)
@@ -143,10 +162,21 @@ def rediscover_instructional(item: dict[str, Any]) -> dict[str, Any]:
 
     existing_by_path = {v.get("path"): v for v in (item.get("videos") or []) if isinstance(v, dict)}
     discovered: list[dict[str, Any]] = []
-    for dirpath, _dirnames, filenames in os.walk(folder):
+    for dirpath, dirnames, filenames in os.walk(folder):
+        # Skip artefact folders (see scan_library for rationale). In-place
+        # mutation on dirnames prunes the walk so ``elevenlabs/`` and
+        # ``doblajes/`` contents never surface as duplicated videos.
+        dirnames[:] = [
+            d for d in dirnames
+            if d.lower() not in ("elevenlabs", "doblajes")
+        ]
         dp = Path(dirpath)
         for fn in sorted(filenames):
             if Path(fn).suffix.lower() not in VIDEO_EXTENSIONS:
+                continue
+            # Skip dubbed outputs — covers "name_DOBLADO.ext" and any
+            # backup variant ("name_DOBLADO_B_v5.mkv").
+            if "_DOBLADO" in Path(fn).stem:
                 continue
             vp = dp / fn
             key = str(vp)

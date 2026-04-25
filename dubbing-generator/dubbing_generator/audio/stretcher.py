@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -75,6 +76,7 @@ def _rubberband_stretch(
             ],
             check=True,
             capture_output=True,
+            timeout=120,
         )
         return os.path.exists(output_wav) and os.path.getsize(output_wav) > 0
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -92,6 +94,7 @@ def _atempo_ffmpeg(input_wav: str, output_wav: str, ratio: float) -> None:
             "-vn", output_wav,
         ],
         check=True,
+        timeout=120,
     )
 
 
@@ -141,13 +144,13 @@ def stretch_audio(
         logger.warning("Stretch failed (%s); returning trimmed audio", exc)
         return trimmed
     finally:
-        for f in (tmp_in, tmp_out):
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
+        # shutil.rmtree en vez de rmdir: si ffmpeg/rubberband dejaron
+        # archivos adicionales (logs, artefactos), rmdir fallaba en
+        # silencio y el tempdir quedaba huérfano. Acumulado en jobs
+        # largos (100+ frases) llenaba /tmp.
         try:
-            os.rmdir(tmp_dir)
-        except OSError:
-            pass
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as exc:
+            logger.warning(
+                "Failed to remove stretcher tempdir %s: %s", tmp_dir, exc,
+            )

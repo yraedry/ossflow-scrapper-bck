@@ -3,19 +3,34 @@
 from dubbing_generator.tts.bjj_en_terms import DEFAULT_BJJ_EN_TERMS
 
 
-def test_default_bjj_terms_is_frozen_set():
+def test_default_bjj_terms_is_empty_frozen_set():
+    # Ronda 8: set vaciado al desactivar code-switching por defecto.
+    # XTTS-v2 no soporta cambiar ``language`` entre chunks sin
+    # alucinar — único fix garantizado es single-span ES. Si alguien
+    # reactiva xtts_code_switching=True, el set vacío hace que
+    # split_by_language devuelva [("es", text)] igual que el path
+    # desactivado (doble red de seguridad).
     assert isinstance(DEFAULT_BJJ_EN_TERMS, frozenset)
-    assert len(DEFAULT_BJJ_EN_TERMS) >= 25
+    assert len(DEFAULT_BJJ_EN_TERMS) == 0
 
 
-def test_default_bjj_terms_are_lowercase():
-    for term in DEFAULT_BJJ_EN_TERMS:
-        assert term == term.lower(), f"non-lowercase term: {term!r}"
-
-
-def test_default_bjj_terms_core_coverage():
-    core = {"underhook", "overhook", "guard", "two on one", "lapel", "mount"}
-    assert core <= DEFAULT_BJJ_EN_TERMS
+def test_default_bjj_terms_no_reintroduced_hallucinators():
+    # Guarda contra regresión: ningún término 1-palabra EN conocido por
+    # disparar alucinación debe reaparecer en el set. La lista cubre los
+    # sospechosos habituales de rondas 1-7. Si algún día se reactiva
+    # code-switching, revisar esta lista antes de poblar.
+    for forbidden in (
+        "underhook", "overhook", "lapel", "sleeve",
+        "guard", "mount", "turtle",
+        "armbar", "triangle", "kimura", "americana", "guillotine",
+        "hook", "sweep", "pass", "passing",
+        "takedown", "shoot", "sprawl", "shrimp",
+        "single leg", "double leg",
+        "seated guard", "standing guard", "closed guard",
+        "two on one", "rear naked choke",
+        "grip", "grips", "frames", "frame", "hooks",
+    ):
+        assert forbidden not in DEFAULT_BJJ_EN_TERMS
 
 
 from dubbing_generator.tts.lang_split import split_by_language

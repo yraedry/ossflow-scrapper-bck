@@ -88,22 +88,119 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
         if not use_model_voice and model_voice_path:
             use_model_voice = Path(model_voice_path).exists()
 
-        config = DubbingConfig(
+        tts_engine = (
+            opts.get("tts_engine")
+            or os.environ.get("DUBBING_TTS_ENGINE")
+            or "elevenlabs"
+        ).strip().lower()
+        if tts_engine not in ("elevenlabs", "piper", "kokoro"):
+            emit(JobEvent(type="log", data={
+                "message": f"unsupported tts_engine={tts_engine!r}, using 'elevenlabs'"
+            }))
+            tts_engine = "elevenlabs"
+
+        config_kwargs = dict(
             use_model_voice=use_model_voice,
             model_voice_path=model_voice_path,
+            tts_engine=tts_engine,
         )
+        if tts_engine == "elevenlabs":
+            if voice_id := opts.get("elevenlabs_voice_id"):
+                config_kwargs["elevenlabs_voice_id"] = str(voice_id)
+            if model_id := opts.get("elevenlabs_model_id"):
+                config_kwargs["elevenlabs_model_id"] = str(model_id)
+            # ElevenLabs produces much cleaner ES than XTTS — no language
+            # hallucination risk, stable prosody per render. Two tunings
+            # that would be unsafe with XTTS pay off here:
+            #   - merge larger blocks → fewer renders → more continuous
+            #     prosody between what were separate SRT slots.
+            #   - longer inter-phrase crossfades → masks the small
+            #     timbre jumps that still exist between cloud renders.
+            # Rationale for the specific values comes from the S01E01
+            # QA: 5 hard_cuts + 5 warnings on 14 boundaries were caused
+            # almost entirely by timbre/F0 jumps and short-gap cuts.
+            # Wider merge caps. ElevenLabs handles 500-char prompts
+            # fluently and the bigger caps mean fewer boundaries — the
+            # S01E01 QA showed that most hard_cuts sat exactly at
+            # boundaries the merger couldn't combine because of char or
+            # gap limits. 1000 ms gap covers the natural pause at end
+            # of sentence when the instructor takes a breath.
+            config_kwargs.setdefault("merge_max_chars", 500)
+            config_kwargs.setdefault("merge_max_gap_ms", 1000)
+            config_kwargs.setdefault("inter_phrase_crossfade_ms", 250)
+            config_kwargs.setdefault("inter_phrase_crossfade_max_gap_ms", 500)
+            config_kwargs.setdefault("force_crossfade_ms", 420)
+            # Tier 3: kept at the same value as force_crossfade_ms.
+            # A first iteration set this to 550 ms — enough to mask a
+            # 10 dB jump perceptually but the longer fade-out made the
+            # next phrase's SRT-anchored start collide with leftover
+            # audio, introducing a 1187 ms silence on a *different*
+            # boundary. The pairwise RMS lift alone already cuts the
+            # raw dB jump (10 → 8 on S01E01) and the standard force
+            # crossfade is enough to hide that residual.
+            config_kwargs.setdefault("rms_jump_crossfade_ms", 420)
+        elif tts_engine == "piper":
+            # Piper is local, deterministic, no hallucination risk. Cadence
+            # is uniform per render so smaller merges are fine, and short
+            # crossfades suffice (no timbre jumps to mask). Castellanize
+            # already runs in the pipeline so EN BJJ terms reach Piper as
+            # ES phonetic spelling.
+            if model_id := opts.get("piper_model_path"):
+                config_kwargs["piper_model_path"] = str(model_id)
+            config_kwargs.setdefault("merge_max_chars", 300)
+            config_kwargs.setdefault("merge_max_gap_ms", 600)
+            config_kwargs.setdefault("inter_phrase_crossfade_ms", 80)
+            config_kwargs.setdefault("force_crossfade_ms", 200)
+            config_kwargs.setdefault("rms_jump_crossfade_ms", 0)
+        elif tts_engine == "kokoro":
+            # Kokoro StyleTTS2: prosodia más natural que Piper, voz preset
+            # ES masculina (em_alex/em_santa). Output 24 kHz nativo. Cadencia
+            # uniforme por render, sin alucinaciones cross-language.
+            if voice := opts.get("kokoro_voice"):
+                config_kwargs["kokoro_voice"] = str(voice)
+            config_kwargs.setdefault("merge_max_chars", 300)
+            config_kwargs.setdefault("merge_max_gap_ms", 600)
+            config_kwargs.setdefault("inter_phrase_crossfade_ms", 100)
+            config_kwargs.setdefault("force_crossfade_ms", 250)
+            config_kwargs.setdefault("rms_jump_crossfade_ms", 0)
+
+        config = DubbingConfig(**config_kwargs)
 
         emit(JobEvent(type="log", data={"message": f"starting dubbing-generator on {input_path}"}))
+        force = bool(opts.get("force"))
+
+        def _remove_existing_output(video_path: Path) -> None:
+            """Drop <Season>/doblajes/<name>.mkv so the pipeline regenerates it."""
+            candidate = video_path.parent / "doblajes" / f"{video_path.stem}.mkv"
+            if candidate.exists():
+                try:
+                    candidate.unlink()
+                    emit(JobEvent(type="log", data={"message":
+                        f"force overwrite: removed existing {candidate.name}"
+                    }))
+                except OSError as exc:
+                    emit(JobEvent(type="log", data={"message":
+                        f"ERROR removing {candidate.name}: {exc}"
+                    }))
+
         pipeline = DubbingPipeline(config)
         if input_path.is_file():
             srt = _resolve_srt_for(input_path)
             if srt is None:
                 raise FileNotFoundError(f"No Spanish SRT found for {input_path.name}")
             emit(JobEvent(type="log", data={"message": f"using literal ES SRT: {srt.name}"}))
+            if force:
+                _remove_existing_output(input_path)
             out = pipeline.process_file(input_path, srt)
             emit(JobEvent(type="progress", data={"pct": 100, "videos": 1}))
             emit(JobEvent(type="log", data={"message": f"dubbed: {out.name}"}))
         else:
+            if force:
+                for vid in input_path.rglob("*"):
+                    if vid.is_file() and vid.suffix.lower() in (".mp4", ".mkv", ".mov", ".avi") \
+                            and "_DOBLADO" not in vid.stem \
+                            and vid.parent.name.lower() not in ("doblajes", "elevenlabs"):
+                        _remove_existing_output(vid)
             results = pipeline.process_directory(input_path)
             emit(JobEvent(type="progress", data={"pct": 100, "videos": len(results)}))
 

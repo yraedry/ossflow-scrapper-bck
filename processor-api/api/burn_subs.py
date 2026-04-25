@@ -90,6 +90,11 @@ def _ffmpeg_escape_subs_path(p: Path) -> str:
     return s
 
 
+# Límite de encode por vídeo. En H.264 veryfast, 6 h de vídeo son raros; si se
+# supera, casi seguro es un vídeo corrupto que tiene a ffmpeg colgado.
+_BURN_TIMEOUT_SEC = 6 * 60 * 60
+
+
 async def _burn_one(video: Path, srt: Path) -> tuple[bool, str]:
     out = video.with_name(video.stem + OUT_SUFFIX)
     tmp = out.with_suffix(out.suffix + ".part")
@@ -114,13 +119,28 @@ async def _burn_one(video: Path, srt: Path) -> tuple[bool, str]:
         "20",
         str(tmp),
     ]
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await proc.communicate()
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=_BURN_TIMEOUT_SEC
+            )
+        except asyncio.TimeoutError:
+            # Un ffmpeg colgado bloqueaba el worker indefinidamente — matamos
+            # el proceso y liberamos el temporal.
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:  # noqa: BLE001
+                pass
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+            return False, f"ffmpeg timeout after {_BURN_TIMEOUT_SEC}s"
         if proc.returncode != 0:
             if tmp.exists():
                 tmp.unlink(missing_ok=True)

@@ -41,8 +41,9 @@ export function HealthCard({ className }) {
           return (
             <button
               key={b.id}
+              type="button"
               onClick={() => onClick(b)}
-              className="flex w-full items-center justify-between gap-3 rounded-lg border bg-card/50 px-3 py-2 text-left transition-colors hover:bg-accent/40"
+              className="flex w-full items-center justify-between gap-3 rounded-lg border bg-card/50 px-3 py-2 text-left transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <div className="flex min-w-0 items-center gap-2">
                 <span

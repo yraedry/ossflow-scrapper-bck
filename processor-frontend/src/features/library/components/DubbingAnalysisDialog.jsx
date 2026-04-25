@@ -404,7 +404,7 @@ export default function DubbingAnalysisDialog({ open, onOpenChange, videoPath })
                   checked={synthesize}
                   onChange={(e) => setSynthesize(e.target.checked)}
                 />
-                Sintetizar TTS real (carga Chatterbox, varios minutos)
+                Sintetizar TTS real (carga XTTS-v2, varios minutos)
               </label>
               {synthesize && (
                 <label className="flex items-center gap-2 text-zinc-400 ml-5">
@@ -432,7 +432,7 @@ export default function DubbingAnalysisDialog({ open, onOpenChange, videoPath })
             <Loader2 className="h-8 w-8 animate-spin text-purple-400" />
             <p className="text-sm text-zinc-400">
               {job?.synthesize
-                ? 'Cargando Chatterbox y sintetizando frases...'
+                ? 'Cargando XTTS-v2 y sintetizando frases...'
                 : 'Analizando SRT y plan de slots...'}
             </p>
             <p className="text-xs text-zinc-600">

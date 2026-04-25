@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Sidebar } from './Sidebar'
 import { Topbar } from './Topbar'
 import { CommandPalette } from './CommandPalette'
+import ElevenLabsGlobalWatcher from '@/features/elevenlabs/components/ElevenLabsGlobalWatcher'
 
 const STORAGE_KEY = 'bjj-sidebar-collapsed'
 
@@ -31,6 +32,7 @@ export function AppShell({ children }) {
         </main>
       </div>
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      <ElevenLabsGlobalWatcher />
     </div>
   )
 }

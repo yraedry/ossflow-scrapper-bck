@@ -17,6 +17,7 @@ import {
   ChevronDown,
   Languages,
   Download,
+  RefreshCw,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/Badge'
@@ -39,6 +40,8 @@ const PIPELINE_STEPS = [
 ]
 
 const STEPS_KEY = 'process_all_steps_v2'
+const FORCE_KEY = 'process_all_force_v1'
+const CONTINUE_ON_FAIL_KEY = 'process_all_continue_on_fail_v1'
 
 function loadSteps() {
   try {
@@ -49,6 +52,20 @@ function loadSteps() {
     }
   } catch { /* noop */ }
   return ['chapters', 'subtitles', 'translate', 'dubbing']
+}
+
+function loadForce() {
+  try {
+    return localStorage.getItem(FORCE_KEY) === '1'
+  } catch { return false }
+}
+
+function loadContinueOnFail() {
+  try {
+    const raw = localStorage.getItem(CONTINUE_ON_FAIL_KEY)
+    // Default: true — un fallo puntual en S01 no debería detener S02-SXX.
+    return raw === null ? true : raw === '1'
+  } catch { return true }
 }
 
 function StatusPill({ ok, label, Icon }) {
@@ -75,15 +92,33 @@ export default function InstructionalHero({
   processingAll = false,
 }) {
   const nav = useNavigate()
-  const [cacheBust, setCacheBust] = useState(0)
+  const [cacheBust, setCacheBust] = useState(() => instructional?.poster_mtime || 0)
   const [posterErrored, setPosterErrored] = useState(false)
   const [selectedSteps, setSelectedSteps] = useState(loadSteps)
+  const [forceRegen, setForceRegen] = useState(loadForce)
+  const [continueOnFail, setContinueOnFail] = useState(loadContinueOnFail)
   const fileInputRef = useRef(null)
 
   const toggleStep = (id) => {
     setSelectedSteps((prev) => {
       const next = prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
       try { localStorage.setItem(STEPS_KEY, JSON.stringify(next)) } catch { /* noop */ }
+      return next
+    })
+  }
+
+  const toggleForce = () => {
+    setForceRegen((prev) => {
+      const next = !prev
+      try { localStorage.setItem(FORCE_KEY, next ? '1' : '0') } catch { /* noop */ }
+      return next
+    })
+  }
+
+  const toggleContinueOnFail = () => {
+    setContinueOnFail((prev) => {
+      const next = !prev
+      try { localStorage.setItem(CONTINUE_ON_FAIL_KEY, next ? '1' : '0') } catch { /* noop */ }
       return next
     })
   }
@@ -95,7 +130,7 @@ export default function InstructionalHero({
     }
     // Preserve pipeline order
     const ordered = PIPELINE_STEPS.map((s) => s.id).filter((id) => selectedSteps.includes(id))
-    onProcessAll(ordered)
+    onProcessAll(ordered, { force: forceRegen, continueOnFail })
   }
 
   const name = instructional?.name || ''
@@ -179,18 +214,22 @@ export default function InstructionalHero({
       <div className="relative flex flex-col gap-6 p-6 md:flex-row md:p-8">
         {/* Poster */}
         <div className="flex-shrink-0">
-          <div className="relative aspect-[2/3] w-[200px] overflow-hidden rounded-lg border border-zinc-800 bg-black shadow-2xl md:w-[280px]">
+          {/* Sin aspect-ratio fijo: el ancho es 200/280 px y la altura la
+              dicta la imagen. BJJFanatics mezcla ratios 0.70-0.80 entre
+              instruccionales y forzar uno común recortaba texto o dejaba
+              bandas negras según el caso. */}
+          <div className="relative w-[200px] overflow-hidden rounded-lg border border-zinc-800 bg-black shadow-2xl md:w-[280px]">
             {src ? (
               <img
                 src={src}
                 alt={name}
                 onError={() => setPosterErrored(true)}
-                className="h-full w-full object-contain"
+                className="block h-auto w-full"
                 loading="lazy"
                 decoding="async"
               />
             ) : (
-              <div className="flex h-full w-full items-center justify-center">
+              <div className="flex aspect-[3/4] w-full items-center justify-center">
                 <Film className="h-16 w-16 text-zinc-700" />
               </div>
             )}
@@ -330,6 +369,53 @@ export default function InstructionalHero({
             <Button variant="outline" onClick={onEditMetadata}>
               <Pencil className="mr-2 h-4 w-4" /> Editar metadatos
             </Button>
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={toggleForce}
+              disabled={processingAll}
+              title="Sobrescribe subtítulos EN, traducciones ES y doblajes existentes. Los capítulos ya detectados no se regeneran."
+              className={cn(
+                'inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors',
+                forceRegen
+                  ? 'border-amber-500/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+                  : 'border-zinc-700 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200',
+                processingAll && 'opacity-50 cursor-not-allowed',
+              )}
+            >
+              <div className={cn(
+                'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
+                forceRegen ? 'border-amber-400 bg-amber-500 text-zinc-950' : 'border-zinc-600',
+              )}>
+                {forceRegen && <span className="text-[9px] font-bold leading-none">✓</span>}
+              </div>
+              <RefreshCw className="h-3.5 w-3.5" />
+              Forzar regeneración
+            </button>
+
+            <button
+              type="button"
+              onClick={toggleContinueOnFail}
+              disabled={processingAll}
+              title="Si una season falla, sigue con las siguientes en vez de detener todo el instruccional."
+              className={cn(
+                'inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors',
+                continueOnFail
+                  ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+                  : 'border-zinc-700 bg-zinc-900/50 text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200',
+                processingAll && 'opacity-50 cursor-not-allowed',
+              )}
+            >
+              <div className={cn(
+                'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
+                continueOnFail ? 'border-emerald-400 bg-emerald-500 text-zinc-950' : 'border-zinc-600',
+              )}>
+                {continueOnFail && <span className="text-[9px] font-bold leading-none">✓</span>}
+              </div>
+              Continuar si una season falla
+            </button>
           </div>
         </div>
       </div>

@@ -3,7 +3,7 @@
 // Detalle de instructional: hero (póster + CTAs) + tabs (Capítulos / Pipeline
 // / Metadatos / Logs / Oracle). La pestaña activa se persiste en el search
 // param `?tab=…` para compartir URL.
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, AlertCircle } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -16,9 +16,11 @@ import InstructionalHero from '@/features/library/components/InstructionalHero'
 import ChaptersTab from '@/features/library/components/ChaptersTab'
 import MetadataTab from '@/features/library/components/MetadataTab'
 import OracleTab from '@/features/library/components/OracleTab'
+import QaTab from '@/features/library/components/QaTab'
 
 const TABS = [
   { id: 'chapters', label: 'Capítulos' },
+  { id: 'qa', label: 'QA doblaje' },
   { id: 'metadata', label: 'Metadatos' },
   { id: 'oracle', label: 'Oracle' },
 ]
@@ -62,7 +64,20 @@ export default function InstructionalDetailPage() {
   const startPipeline = useStartPipeline()
   const [starting, setStarting] = useState(false)
 
-  const goProcessAll = async (steps) => {
+  // AbortController compartido entre el polling de pipelines y fetches.
+  // Si el usuario navega fuera mientras ``waitForPipeline`` aún itera,
+  // el ciclo ``while (true)`` seguía corriendo y el fetch podía escribir
+  // state en un componente desmontado → warning de React + leak de
+  // promesa. El ref se aborta en el cleanup del useEffect.
+  const abortRef = useRef(null)
+  useEffect(() => {
+    abortRef.current = new AbortController()
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
+
+  const goProcessAll = async (steps, extra = {}) => {
     if (!data?.path) return
     setStarting(true)
     try {
@@ -87,42 +102,89 @@ export default function InstructionalDetailPage() {
 
       // Lanza pipelines en secuencia — espera completed/failed antes del siguiente
       // para evitar que WhisperX cargue en GPU múltiples veces simultáneamente.
+      //
+      // El polling NO usa el AbortController del componente: si el usuario
+      // navega fuera de la página de detalle, el bucle debe seguir lanzando
+      // seasons igualmente (los pipelines viven en el backend). Solo los
+      // fetches individuales tienen un timeout corto para no bloquearse.
       const waitForPipeline = async (id) => {
         const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
-        while (true) {
+        // Safety cap: ~3h máximo por season (2700 * 4s)
+        for (let iter = 0; iter < 2700; iter++) {
           await new Promise((r) => setTimeout(r, 4000))
           try {
-            const p = await fetch(`/api/pipeline/${id}`).then((r) => r.json())
+            const res = await fetch(`/api/pipeline/${id}`)
+            if (!res.ok) continue
+            const p = await res.json()
             if (TERMINAL.has(p.status)) return p.status
-          } catch { /* sigue esperando */ }
+          } catch {
+            // red transitoria: reintenta
+          }
         }
+        return 'timeout'
       }
 
       const orderedSteps = [...steps]
       const opts = { mode: 'oracle' }
+      if (extra?.force) opts.force = true
+      const continueOnFail = extra?.continueOnFail !== false
 
       let lastId = null
+      let launched = 0
+      console.log(`[process-all] starting ${paths.length} seasons:`, paths)
       for (let i = 0; i < paths.length; i++) {
-        const resp = await startPipeline.mutateAsync({
-          path: paths[i],
-          steps: orderedSteps,
-          options: opts,
-        })
+        console.log(`[process-all] launching season ${i + 1}/${paths.length}: ${paths[i]}`)
+        let resp
+        try {
+          resp = await startPipeline.mutateAsync({
+            path: paths[i],
+            steps: orderedSteps,
+            options: opts,
+          })
+        } catch (err) {
+          console.error(`[process-all] season ${i + 1} start failed:`, err)
+          toast.error(`Season ${i + 1} no pudo lanzarse: ${err?.message || err}`)
+          if (!continueOnFail) break
+          continue
+        }
         const id = resp?.pipeline_id || resp?.id
-        if (!id) { toast.error('No se recibió pipeline_id'); break }
+        if (!id) {
+          console.error('[process-all] no pipeline_id in response:', resp)
+          toast.error('No se recibió pipeline_id')
+          if (!continueOnFail) break
+          continue
+        }
         lastId = id
+        launched += 1
         toast.info(`Season ${i + 1}/${paths.length} lanzada`)
         if (i < paths.length - 1) {
+          console.log(`[process-all] waiting for pipeline ${id}…`)
           const status = await waitForPipeline(id)
-          if (status === 'failed' || status === 'cancelled') {
-            toast.error(`Season ${i + 1} falló (${status}), deteniendo`)
+          console.log(`[process-all] season ${i + 1} terminal status: ${status}`)
+          if (status === 'cancelled') {
+            toast.warning('Pipeline cancelado, deteniendo')
             break
+          }
+          if (status === 'timeout') {
+            toast.warning(`Season ${i + 1} superó el tiempo máximo de espera, continuando`)
+          }
+          if (status === 'failed') {
+            if (continueOnFail) {
+              toast.warning(`Season ${i + 1} falló, continuando con la siguiente`)
+            } else {
+              toast.error(`Season ${i + 1} falló, deteniendo`)
+              break
+            }
           }
         }
       }
 
-      if (lastId) nav(`/pipelines/${lastId}`)
-      else toast.error('No se recibió pipeline_id del servidor')
+      console.log(`[process-all] done. launched ${launched}/${paths.length}`)
+      if (launched === paths.length && paths.length > 1) {
+        toast.success(`${paths.length} seasons completadas`)
+      }
+      // NO navegamos automáticamente — el usuario puede querer quedarse en
+      // la página del instruccional. Si quieren ver el pipeline, usan el tab.
     } catch (err) {
       toast.error(`Error iniciando pipeline: ${err.message || 'desconocido'}`)
     } finally {
@@ -206,6 +268,9 @@ export default function InstructionalDetailPage() {
 
         <TabsContent value="chapters" className="mt-0">
           <ChaptersTab instructional={data} />
+        </TabsContent>
+        <TabsContent value="qa" className="mt-0">
+          <QaTab instructional={data} />
         </TabsContent>
         <TabsContent value="metadata" className="mt-0">
           <MetadataTab instructional={data} />

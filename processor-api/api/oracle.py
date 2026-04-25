@@ -175,6 +175,101 @@ def _has_local_poster(folder: Path) -> bool:
     return False
 
 
+def _trim_black_borders(path: Path, *, threshold: int = 18, min_keep_ratio: float = 0.4) -> bool:
+    """Crop solid black (or near-black) borders from a poster file in-place.
+
+    BJJFanatics serves many posters as portrait-canvas JPEGs with the real
+    cover art centred between black bands — e.g. "Engaging without regrets"
+    and "Tripod Passing" arrive as 1631×2194 images whose top ~250 px and
+    bottom ~350 px are plain black. Older, square-capable products like
+    Half Guard Anthology ship flush art and need no trim. We detect this
+    per-file by thresholding the image to a binary mask and picking up the
+    tight bounding box of non-black pixels.
+
+    Guards:
+      * ``threshold`` — pixels darker than this in all channels are treated
+        as border. 18 catches the JPEG compression noise around true black
+        without eating dark clothing in the art.
+      * ``min_keep_ratio`` — never trim away more than 60% in either
+        dimension. Stops a false positive on genuinely dark art (e.g. a
+        black-gi instructional) from destroying the poster.
+
+    Returns True if the file was modified.
+    """
+    try:
+        from PIL import Image, ImageChops  # noqa: WPS433 — optional dep path
+    except ImportError:
+        log.debug("Pillow not available, skipping poster trim")
+        return False
+    try:
+        with Image.open(path) as im:
+            rgb = im.convert("RGB")
+            # ImageChops.difference with a solid black reference gives us
+            # per-pixel "distance from black"; getbbox() on a thresholded
+            # version is the portable way to find the tight crop.
+            bg = Image.new("RGB", rgb.size, (0, 0, 0))
+            diff = ImageChops.difference(rgb, bg)
+            mask = diff.convert("L").point(lambda v: 255 if v > threshold else 0)
+            bbox = mask.getbbox()
+            if not bbox:
+                return False  # image is entirely black — leave alone
+            left, top, right, bottom = bbox
+            width, height = rgb.size
+            new_w = right - left
+            new_h = bottom - top
+            if (
+                new_w >= width
+                and new_h >= height
+            ):
+                return False  # nothing to trim
+            if new_w < width * min_keep_ratio or new_h < height * min_keep_ratio:
+                # Suspicious — we'd be cropping >60% away. Likely a
+                # genuinely dark poster; leave the original alone.
+                log.info(
+                    "skipping poster trim for %s (would keep %dx%d of %dx%d)",
+                    path.name, new_w, new_h, width, height,
+                )
+                return False
+            cropped = rgb.crop(bbox)
+            cropped.save(path, quality=92, optimize=True)
+            log.info(
+                "trimmed poster %s: %dx%d → %dx%d",
+                path.name, width, height, new_w, new_h,
+            )
+            return True
+    except Exception as exc:
+        log.warning("poster trim failed for %s: %s", path, exc)
+        return False
+
+
+def _strip_shopify_thumb(url: str) -> str:
+    """Remove Shopify CDN size mutations (query + in-path) on a poster URL.
+
+    Older cached sidecars stored URLs with ``?crop=center&height=300&width=300``
+    or an ``_NNNxMMM`` suffix in the path. Those serve a 300×300 centre-cropped
+    thumbnail that loses the top of the cover art (e.g. the word "ENGAGING"
+    on Jozef Chen's product). Strip both forms so the redownload grabs the
+    full-res original. Mirrors BjjFanaticsProvider._strip_shopify_size.
+    """
+    import re as _re
+    if "cdn.shop" not in url and "cdn.shopify" not in url and "bjjfanatics.com/cdn" not in url:
+        return url
+    try:
+        base, _sep, query = url.partition("?")
+        base = _re.sub(r"_\d+x\d+(?=\.[A-Za-z0-9]+$)", "", base)
+        if not query:
+            return base
+        keep = []
+        for part in query.split("&"):
+            key = part.split("=", 1)[0].lower()
+            if key in {"width", "height", "crop", "pad_color"}:
+                continue
+            keep.append(part)
+        return base + ("?" + "&".join(keep) if keep else "")
+    except Exception:
+        return url
+
+
 async def _download_poster_if_missing(
     folder: Path, poster_url: str | None, *, force: bool = False
 ) -> str | None:
@@ -185,6 +280,9 @@ async def _download_poster_if_missing(
     """
     if not poster_url:
         return None
+    # Defensive: old sidecars may carry crop-center size mutations. Strip
+    # them so we always fetch the highest-res original available.
+    poster_url = _strip_shopify_thumb(poster_url)
     if force:
         for stem in _POSTER_STEMS:
             for ext in _POSTER_EXTS:
@@ -226,6 +324,9 @@ async def _download_poster_if_missing(
             raw = r.content
             tmp.write_bytes(raw)
             os.replace(tmp, dest)
+            # Remove the black canvas padding BJJFanatics bakes into many
+            # portrait posters. Safe to no-op if the file is already tight.
+            _trim_black_borders(dest)
             log.info("downloaded poster to %s", dest)
             return dest.name
     except (httpx.HTTPError, OSError) as exc:

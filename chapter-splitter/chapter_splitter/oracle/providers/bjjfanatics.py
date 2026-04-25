@@ -433,18 +433,29 @@ class BJJFanaticsProvider:
 
     @staticmethod
     def _strip_shopify_size(url: str) -> str:
-        """Remove Shopify CDN size-mutation query params.
+        """Remove Shopify CDN size mutations from both query and path.
 
-        og:image often ships a 300×300 center-cropped thumbnail (``?crop=center
-        &height=300&width=300``). Stripping those params yields the full-res
-        original which preserves the portrait aspect ratio.
+        Shopify ships two kinds of size variants:
+
+        * Query-param form: ``image.jpg?crop=center&height=300&width=300`` —
+          strip those params and we get the full-res original.
+        * In-path form: ``image_480x480.jpg`` — Shopify also encodes the
+          size as a ``_WIDTHxHEIGHT`` suffix before the extension. Newer
+          BJJFanatics products (e.g. "Engaging without regrets") only ship
+          the size this way in the Shopify JSON candidates, so query
+          stripping leaves us with a cropped thumbnail. We remove that
+          suffix too — Shopify serves the un-suffixed URL as the original.
         """
         if "cdn.shop" not in url and "cdn.shopify" not in url:
             return url
         try:
             base, _, query = url.partition("?")
+            # Strip `_NNNxMMM` right before the final extension. Anchored
+            # to a file-extension so we don't accidentally mutate unrelated
+            # substrings inside the path.
+            base = re.sub(r"_\d+x\d+(?=\.[A-Za-z0-9]+$)", "", base)
             if not query:
-                return url
+                return base
             keep = []
             for part in query.split("&"):
                 key = part.split("=", 1)[0].lower()
@@ -511,8 +522,14 @@ class BJJFanaticsProvider:
     ) -> str | None:
         """Pick the most portrait candidate that also meets the min-width bar.
 
-        Sorts by (ratio asc, height desc) so we prefer taller portraits over
-        wider ones with the same ratio.
+        Three tiers — preferred portrait first, relaxed portrait, then the
+        biggest image of any aspect ratio as a last resort. BJJFanatics
+        started shipping landscape 16:9 promo posters for newer instructionals
+        (e.g. "Engaging without regrets"); forcing portrait here returned
+        None and left us with a 300×300 og:image thumbnail that cropped
+        the title. Accepting landscape in the final tier keeps Oracle
+        usable on those products — the frontend handles non-portrait
+        aspect ratios with ``object-contain``.
         """
         viable = [
             (url, w, h)
@@ -520,17 +537,28 @@ class BJJFanaticsProvider:
             if w >= self._POSTER_MIN_WIDTH and (w / h) <= self._POSTER_RATIO_MIN
         ]
         if not viable:
-            # Accept anything portrait-ish if no strict match
             viable = [
                 (url, w, h)
                 for (url, w, h) in candidates
                 if w >= self._POSTER_MIN_WIDTH
                 and (w / h) <= self._POSTER_RATIO_PREFERRED
             ]
-        if not viable:
+        if viable:
+            viable.sort(key=lambda t: (t[1] / t[2], -t[2]))
+            return viable[0][0]
+
+        # Final tier: no portrait candidate at all — accept any landscape
+        # image as long as it's bigger than the og:image thumbnail. Pick
+        # the widest one (more likely to show the full cover art).
+        landscape = [
+            (url, w, h)
+            for (url, w, h) in candidates
+            if w >= self._POSTER_MIN_WIDTH
+        ]
+        if not landscape:
             return None
-        viable.sort(key=lambda t: (t[1] / t[2], -t[2]))
-        return viable[0][0]
+        landscape.sort(key=lambda t: -t[1])
+        return landscape[0][0]
 
     def _parse_volume(self, h3_node, content_node) -> OracleVolume | None:
         h3_text = h3_node.text(strip=True) or ""

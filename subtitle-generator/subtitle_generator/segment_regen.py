@@ -54,7 +54,19 @@ def extract_audio_window(
         "-ac", "1", "-ar", "16000",
         "-vn", str(out),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # Timeout defensivo: ffmpeg sin timeout puede colgar el worker
+    # FastAPI indefinidamente si el vídeo tiene codec exótico o el
+    # filesystem está lento (NAS, I/O stall). 60 s es muy holgado
+    # para extraer una ventana de <30 s — si excede, algo va mal.
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60.0,
+        )
+    except subprocess.TimeoutExpired:
+        out.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"ffmpeg timeout (>60s) extracting window from {video_path.name}",
+        )
     if proc.returncode != 0:
         out.unlink(missing_ok=True)
         raise RuntimeError(f"ffmpeg falló: {proc.stderr.strip()}")

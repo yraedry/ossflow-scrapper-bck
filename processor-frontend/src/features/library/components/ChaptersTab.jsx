@@ -12,12 +12,10 @@ import {
   Play,
   Eye,
   Loader2,
-  Flame,
   ShieldCheck,
   Scissors,
   Languages,
   RotateCw,
-  Activity,
 } from 'lucide-react'
 import {
   Accordion,
@@ -35,16 +33,13 @@ import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/Badge'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
-import { useRenameChapter, useBurnSubs, useBurnSubsVideo, useRenameByOracle } from '../api/useLibrary'
-import { useTranslateSrt } from '../api/useSubtitles'
+import { useRenameChapter, useRenameByOracle } from '../api/useLibrary'
 import { useStartPipeline } from '@/features/pipeline/api/usePipeline'
+import { useStartElevenLabsDubbing, useElevenLabsJob, useStartElevenLabsBatch } from '@/features/elevenlabs/api/useElevenLabsDubbing'
 import { useOracleData } from '@/features/oracle/api/useOracle'
 import SubtitleValidationDialog from './SubtitleValidationDialog'
 import SeasonValidationDialog from './SeasonValidationDialog'
-import AudioAnalysisDialog from './AudioAnalysisDialog'
-import DubbingAnalysisDialog from './DubbingAnalysisDialog'
-import useAudioAnalysis from '../stores/useAudioAnalysis'
-import useDubbingAnalysis from '../stores/useDubbingAnalysis'
+import DubQaBadge from './DubQaBadge'
 import VideoReviewDialog from '@/components/media/VideoReviewDialog'
 
 function srtPathFor(videoPath) {
@@ -93,17 +88,58 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
   const [draft, setDraft] = useState('')
   const [err, setErr] = useState(null)
   const [validateOpen, setValidateOpen] = useState(false)
-  const [debugOpen, setDebugOpen] = useState(false)
-  const [dubDebugOpen, setDubDebugOpen] = useState(false)
-  const analysisJob = useAudioAnalysis((s) => s.jobs[video.path])
-  const dubAnalysisJob = useDubbingAnalysis((s) => s.jobs[video.path])
   const [playerOpen, setPlayerOpen] = useState(false)
   const inputRef = useRef(null)
   const nav = useNavigate()
   const rename = useRenameChapter()
   const startSplit = useStartPipeline()
-  const translate = useTranslateSrt()
-  const burnSubs = useBurnSubsVideo()
+  const startElevenLabs = useStartElevenLabsDubbing()
+  const [elevenLabsJobId, setElevenLabsJobId] = useState(null)
+  const elevenLabsJob = useElevenLabsJob(elevenLabsJobId)
+
+  const handleElevenLabs = async () => {
+    if (startElevenLabs.isPending || elevenLabsJobId) return
+    const confirmMsg =
+      `Enviar "${video.filename}" a ElevenLabs Dubbing Studio?\n\n` +
+      `• Consume créditos de tu plan\n` +
+      `• Con marca de agua (33% menos créditos)\n` +
+      `• Resultado en <Season>/elevenlabs/ con el mismo nombre\n` +
+      `• Sigue el progreso en la sección ElevenLabs de la barra lateral`
+    if (!window.confirm(confirmMsg)) return
+    const toastId = toast.loading('Enviando a ElevenLabs…')
+    try {
+      const resp = await startElevenLabs.mutateAsync({ path: video.path })
+      const jid = resp?.job_id
+      setElevenLabsJobId(jid)
+      toast.success(`Job ${jid} iniciado`, {
+        id: toastId,
+        duration: 5000,
+        action: {
+          label: 'Ver progreso',
+          onClick: () => nav('/elevenlabs'),
+        },
+      })
+    } catch (e) {
+      const msg = e?.body?.detail || e?.message || 'Error'
+      toast.error(`ElevenLabs falló: ${msg}`, { id: toastId })
+    }
+  }
+
+  // Terminal transitions: fire a loud toast and clear the inline badge.
+  // The persistent view lives at /elevenlabs, so we don't need to keep
+  // the pill visible after completion.
+  useEffect(() => {
+    if (!elevenLabsJob.data) return
+    const { status, message, result } = elevenLabsJob.data
+    if (status === 'completed') {
+      const out = result?.output_filename || result?.output_path?.split(/[\\\/]/).pop() || 'ok'
+      toast.success(`ElevenLabs listo: ${out}`, { duration: 10000 })
+      setElevenLabsJobId(null)
+    } else if (status === 'failed') {
+      toast.error(`ElevenLabs falló: ${message || 'error'}`, { duration: 15000 })
+      setElevenLabsJobId(null)
+    }
+  }, [elevenLabsJob.data?.status, nav])
 
   useEffect(() => {
     if (editing) {
@@ -161,12 +197,10 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
   const [processOpen, setProcessOpen] = useState(false)
   const [selectedSteps, setSelectedSteps] = useState([])
   const [forceRegen, setForceRegen] = useState(false)
-  const [burnAfter, setBurnAfter] = useState(false)
 
   const openProcessMenu = () => {
     setSelectedSteps([...missing])
     setForceRegen(false)
-    setBurnAfter(false)
     setProcessOpen(true)
   }
 
@@ -180,39 +214,20 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
     setProcessOpen(false)
     const order = ['chapters', 'subtitles', 'translate', 'dubbing']
     const sorted = order.filter((s) => selectedSteps.includes(s))
-    if (!sorted.length && !burnAfter) return
+    if (!sorted.length) return
 
     const launchingId = toast.loading('Lanzando pipeline…')
     try {
-      if (sorted.length) {
-        const opts = forceRegen ? { force: true } : {}
-        if (hasOracle && sorted.includes('chapters')) opts.mode = 'oracle'
-        const resp = await startSplit.mutateAsync({ path: video.path, steps: sorted, options: opts })
-        const id = resp?.pipeline_id || resp?.id
-        toast.success('Pipeline lanzado', { id: launchingId })
-        if (id) nav(`/pipelines/${id}`)
-      }
-      if (burnAfter) {
-        await burnSubs.mutateAsync({ path: video.path })
-        toast.success('Quema de subs iniciada', { id: launchingId })
-      }
+      const opts = forceRegen ? { force: true } : {}
+      if (hasOracle && sorted.includes('chapters')) opts.mode = 'oracle'
+      const resp = await startSplit.mutateAsync({ path: video.path, steps: sorted, options: opts })
+      const id = resp?.pipeline_id || resp?.id
+      toast.success('Pipeline lanzado', { id: launchingId })
+      if (id) nav(`/pipelines/${id}`)
     } catch (e) {
       toast.error(`Error: ${e?.message || 'desconocido'}`, { id: launchingId })
     }
   }
-
-  const handleTranslate = async () => {
-    const srt = srtPathFor(video.path)
-    if (!srt) return
-    try {
-      const resp = await translate.mutateAsync({ srtPath: srt })
-      toast.success(`Traducido: ${resp?.out_path?.split(/[\\\/]/).pop() || 'ok'}`)
-    } catch (e) {
-      const msg = e?.response?.data?.detail || e?.message || 'Error'
-      toast.error(`Traducción falló: ${msg}`)
-    }
-  }
-
 
   const handleSplit = async () => {
     try {
@@ -320,6 +335,7 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
           <StatusBadge ok={hasSubs} Icon={Captions} label="Subs EN" />
           <StatusBadge ok={hasSubsEs} Icon={Languages} label="Subs ES" />
           <StatusBadge ok={hasDub} Icon={Mic} label="Doblaje ES" />
+          <DubQaBadge videoPath={video.path} enabled={hasDub} />
         </div>
       </td>
       <td className="px-3 py-2 text-right shrink-0 whitespace-nowrap">
@@ -346,58 +362,24 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => setDebugOpen(true)}
-            title="Análisis de audio (debug subs)"
-            className={cn(
-              analysisJob?.status === 'pending' && 'text-blue-400',
-              analysisJob?.status === 'done' && 'text-emerald-400',
-              analysisJob?.status === 'error' && 'text-red-400',
-            )}
+            type="button"
+            onClick={elevenLabsJobId ? () => nav('/elevenlabs') : handleElevenLabs}
+            disabled={startElevenLabs.isPending}
+            title={
+              elevenLabsJobId
+                ? 'Job en curso — click para ir a la página de ElevenLabs'
+                : 'Doblar con ElevenLabs Dubbing Studio (consume créditos del plan)'
+            }
+            className="text-violet-400 hover:text-violet-300"
           >
-            {analysisJob?.status === 'pending' ? (
-              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-            ) : (
-              <Activity className="mr-1 h-3 w-3" />
-            )}
-            {analysisJob?.status === 'done' ? 'Ver análisis' : 'Debug'}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setDubDebugOpen(true)}
-            title="Análisis del doblaje (debug dubbing)"
-            className={cn(
-              dubAnalysisJob?.status === 'pending' && 'text-purple-400',
-              dubAnalysisJob?.status === 'done' && 'text-emerald-400',
-              dubAnalysisJob?.status === 'error' && 'text-red-400',
-            )}
-          >
-            {dubAnalysisJob?.status === 'pending' ? (
+            {startElevenLabs.isPending || elevenLabsJobId ? (
               <Loader2 className="mr-1 h-3 w-3 animate-spin" />
             ) : (
               <Mic className="mr-1 h-3 w-3" />
             )}
-            {dubAnalysisJob?.status === 'done' ? 'Ver dub' : 'Dub dbg'}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={handleTranslate}
-            disabled={translate.isPending || !hasSubs || hasSubsEs}
-            title={
-              !hasSubs
-                ? 'Sin subtítulos EN para traducir'
-                : hasSubsEs
-                  ? 'Ya tiene subtítulos ES'
-                  : 'Traducir subtítulos EN → ES'
-            }
-          >
-            {translate.isPending ? (
-              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-            ) : (
-              <Languages className="mr-1 h-3 w-3" />
-            )}
-            Traducir
+            {elevenLabsJobId
+              ? `ElevenLabs ${elevenLabsJob.data?.progress ?? 0}%`
+              : 'ElevenLabs'}
           </Button>
           <DropdownMenu open={processOpen} onOpenChange={setProcessOpen}>
             <DropdownMenuTrigger asChild>
@@ -450,22 +432,6 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
               <div className="mt-2 border-t border-zinc-800 pt-2 space-y-0.5">
                 <button
                   type="button"
-                  onClick={(e) => { e.preventDefault(); setBurnAfter((v) => !v) }}
-                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm cursor-pointer hover:bg-zinc-800 text-zinc-400"
-                >
-                  <span
-                    className={cn(
-                      'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
-                      burnAfter ? 'border-orange-500 bg-orange-500/20' : 'border-zinc-600',
-                    )}
-                  >
-                    {burnAfter && <Check className="h-3 w-3 text-orange-400" />}
-                  </span>
-                  <Flame className="h-3.5 w-3.5" />
-                  Quemar subs ES
-                </button>
-                <button
-                  type="button"
                   onClick={(e) => { e.preventDefault(); setForceRegen((v) => !v) }}
                   className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm cursor-pointer hover:bg-zinc-800 text-zinc-400"
                 >
@@ -484,7 +450,7 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
               <Button
                 size="sm"
                 className="mt-2 w-full"
-                disabled={(selectedSteps.length === 0 && !burnAfter) || startSplit.isPending}
+                disabled={selectedSteps.length === 0 || startSplit.isPending}
                 onClick={launchProcess}
               >
                 {startSplit.isPending ? (
@@ -505,20 +471,6 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
             videoPath={video.path}
           />
         )}
-        {debugOpen && (
-          <AudioAnalysisDialog
-            open={debugOpen}
-            onOpenChange={setDebugOpen}
-            videoPath={video.path}
-          />
-        )}
-        {dubDebugOpen && (
-          <DubbingAnalysisDialog
-            open={dubDebugOpen}
-            onOpenChange={setDubDebugOpen}
-            videoPath={video.path}
-          />
-        )}
         {playerOpen && (
           <VideoReviewDialog
             open={playerOpen}
@@ -526,7 +478,10 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
             videoPath={video.path}
             title={video.filename}
             hasSubsEn={hasSubs}
-            hasSubsEs={hasDub}
+            // Fix: antes pasábamos `hasDub` como `hasSubsEs`, lo que hacía que el
+            // player intentara cargar pistas .es.srt cuando había dubbing en lugar
+            // de cuando realmente había subtítulos ES → track 404 en consola.
+            hasSubsEs={hasSubsEs}
           />
         )}
       </td>
@@ -641,37 +596,210 @@ function SeasonRenameOracleButton({ seasonPath, oracle, instructionalName }) {
   )
 }
 
-function SeasonBurnButton({ seasonPath }) {
-  const burn = useBurnSubs()
+function SeasonElevenLabsButton({ seasonPath, list }) {
+  const nav = useNavigate()
+  const batch = useStartElevenLabsBatch()
+  // Rough filter so the confirm dialog shows a meaningful count. The
+  // server still recomputes against the actual folder so this doesn't
+  // need to be exact.
+  const candidates = (list || []).filter(
+    (v) => !v.filename?.toLowerCase().endsWith('_doblado.mp4')
+           && !v.filename?.toLowerCase().endsWith('_doblado.mkv'),
+  )
   const onClick = async (e) => {
     e.stopPropagation()
     if (!seasonPath) {
       toast.error('No se pudo inferir la ruta de la Season')
       return
     }
+    const msg =
+      `Enviar ${candidates.length} capítulo(s) de esta Season a ElevenLabs?\n\n` +
+      `• Se procesan en serie (1 a la vez)\n` +
+      `• Capítulos ya presentes en <Season>/elevenlabs/ se omiten\n` +
+      `• Sigue el progreso en el apartado ElevenLabs`
+    if (!window.confirm(msg)) return
     try {
-      const job = await burn.mutateAsync({ path: seasonPath })
-      toast.success(`Quema en curso: ${job?.params?.count ?? '?'} video(s)`)
+      const resp = await batch.mutateAsync({ seasonPath })
+      const q = resp?.queued_count ?? 0
+      const s = resp?.skipped_count ?? 0
+      toast.success(
+        `Encolados ${q}${s ? ` · ${s} omitidos` : ''}`,
+        {
+          action: { label: 'Ver progreso', onClick: () => nav('/elevenlabs') },
+          duration: 6000,
+        },
+      )
     } catch (err) {
-      const msg = err?.message || 'Error'
-      toast.error(`Burn-subs falló: ${msg}`)
+      toast.error(`Batch falló: ${err?.body?.detail || err?.message || 'error'}`)
     }
   }
   return (
     <Button
       size="sm"
       variant="outline"
-      disabled={burn.isPending || !seasonPath}
+      disabled={batch.isPending || !seasonPath || candidates.length === 0}
       onClick={onClick}
-      title="Quemar subtítulos ES en los videos de esta Season"
+      title="Doblar toda la Season con ElevenLabs (serial, omite ya doblados)"
+      className="text-violet-400 hover:text-violet-300"
     >
-      {burn.isPending ? (
+      {batch.isPending ? (
         <Loader2 className="mr-1 h-3 w-3 animate-spin" />
       ) : (
-        <Flame className="mr-1 h-3 w-3" />
+        <Mic className="mr-1 h-3 w-3" />
       )}
-      Quemar subs ES
+      ElevenLabs Season
     </Button>
+  )
+}
+
+function SeasonProcessButton({ seasonPath, list, hasOracle, oracleData }) {
+  const nav = useNavigate()
+  const start = useStartPipeline()
+  const [open, setOpen] = useState(false)
+  const [selectedSteps, setSelectedSteps] = useState([])
+  const [forceRegen, setForceRegen] = useState(false)
+
+  const isChaptered = list.every(
+    (v) =>
+      Boolean(v.season && v.season !== 'Sin temporada') ||
+      /S\d{2}E\d{2,3}/i.test(v.filename || ''),
+  )
+  const allHaveSubs = list.every((v) => Boolean(v.has_subtitles_en))
+  const allHaveSubsEs = list.every((v) => Boolean(v.has_subtitles_es))
+  const allHaveDub = list.every((v) => Boolean(v.has_dubbing || v.has_dubbed))
+
+  const openMenu = () => {
+    const missing = []
+    if (!isChaptered) missing.push('chapters')
+    if (!allHaveSubs) missing.push('subtitles')
+    if (!allHaveSubsEs) missing.push('translate')
+    if (!allHaveDub) missing.push('dubbing')
+    setSelectedSteps(missing.length ? missing : ['subtitles', 'translate', 'dubbing'])
+    setForceRegen(false)
+    setOpen(true)
+  }
+
+  const toggleStep = (key) => {
+    setSelectedSteps((prev) =>
+      prev.includes(key) ? prev.filter((s) => s !== key) : [...prev, key],
+    )
+  }
+
+  const launch = async () => {
+    if (!seasonPath) {
+      toast.error('No se pudo inferir la ruta de la Season')
+      return
+    }
+    const order = ['chapters', 'subtitles', 'translate', 'dubbing']
+    const steps = order.filter((k) => selectedSteps.includes(k))
+    if (!steps.length) return
+    const tid = toast.loading('Lanzando Season…')
+    try {
+      const opts = {}
+      if (hasOracle && steps.includes('chapters')) opts.mode = 'oracle'
+      if (forceRegen) opts.force = true
+      const resp = await start.mutateAsync({ path: seasonPath, steps, options: opts })
+      const id = resp?.pipeline_id || resp?.id
+      toast.success('Pipeline Season lanzado', { id: tid })
+      if (id) nav(`/pipelines/${id}`)
+      setOpen(false)
+    } catch (err) {
+      toast.error(`Error: ${err?.message || 'desconocido'}`, { id: tid })
+    }
+  }
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={(e) => { e.stopPropagation(); openMenu() }}
+          disabled={!seasonPath || start.isPending}
+          title="Procesar toda la Season (elige los pasos)"
+        >
+          {start.isPending ? (
+            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+          ) : (
+            <Play className="mr-1 h-3 w-3" />
+          )}
+          Procesar Season
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56 p-2" onClick={(e) => e.stopPropagation()}>
+        <p className="mb-2 text-xs font-medium text-zinc-400">Pasos a ejecutar</p>
+        {[
+          { key: 'chapters', label: 'Trocear capítulos', Icon: Scissors, done: isChaptered },
+          { key: 'subtitles', label: 'Subtítulos EN', Icon: Captions, done: allHaveSubs },
+          { key: 'translate', label: 'Traducir a ES', Icon: Languages, done: allHaveSubsEs },
+          { key: 'dubbing', label: 'Doblaje', Icon: Mic, done: allHaveDub },
+        ].map(({ key, label, Icon: StepIcon, done }) => {
+          const locked = done && !forceRegen
+          return (
+            <button
+              key={key}
+              type="button"
+              disabled={locked}
+              onClick={(e) => { e.preventDefault(); toggleStep(key) }}
+              className={cn(
+                'flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors',
+                locked
+                  ? 'cursor-not-allowed text-zinc-600 line-through'
+                  : 'cursor-pointer hover:bg-zinc-800 text-zinc-200',
+              )}
+            >
+              <span
+                className={cn(
+                  'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
+                  locked
+                    ? 'border-zinc-700 bg-zinc-800'
+                    : selectedSteps.includes(key)
+                      ? 'border-emerald-500 bg-emerald-500/20'
+                      : 'border-zinc-600',
+                )}
+              >
+                {(locked || selectedSteps.includes(key)) && (
+                  <Check className="h-3 w-3 text-emerald-400" />
+                )}
+              </span>
+              <StepIcon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          )
+        })}
+        <div className="mt-2 border-t border-zinc-800 pt-2 space-y-0.5">
+          <button
+            type="button"
+            onClick={(e) => { e.preventDefault(); setForceRegen((v) => !v) }}
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm cursor-pointer hover:bg-zinc-800 text-zinc-400"
+          >
+            <span
+              className={cn(
+                'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
+                forceRegen ? 'border-amber-500 bg-amber-500/20' : 'border-zinc-600',
+              )}
+            >
+              {forceRegen && <Check className="h-3 w-3 text-amber-400" />}
+            </span>
+            <RotateCw className="h-3.5 w-3.5" />
+            Forzar regeneración
+          </button>
+        </div>
+        <Button
+          size="sm"
+          className="mt-2 w-full"
+          disabled={selectedSteps.length === 0 || start.isPending}
+          onClick={launch}
+        >
+          {start.isPending ? (
+            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+          ) : (
+            <Play className="mr-1 h-3 w-3" />
+          )}
+          Lanzar {selectedSteps.length ? `(${selectedSteps.length})` : ''}
+        </Button>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
@@ -761,14 +889,13 @@ export default function ChaptersTab({ instructional }) {
                       Icon={Captions}
                       title="Traducir subtítulos EN → ES en toda la Season (requiere subs EN previos)"
                     />
-                    <SeasonPipelineButton
+                    <SeasonElevenLabsButton seasonPath={seasonPath} list={list} />
+                    <SeasonProcessButton
                       seasonPath={seasonPath}
-                      steps={['dubbing']}
-                      label="Doblaje"
-                      Icon={Mic}
-                      title="Doblar todos los capítulos de la Season"
+                      list={list}
+                      hasOracle={hasOracle}
+                      oracleData={oracleData}
                     />
-                    <SeasonBurnButton seasonPath={seasonPath} />
                   </>
                 )}
               </div>

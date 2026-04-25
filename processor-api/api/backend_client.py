@@ -19,6 +19,13 @@ log = logging.getLogger(__name__)
 
 RUN_TIMEOUT = 10.0
 STREAM_RECONNECT_DELAY = 2.0
+# SSE streams: el backend envía heartbeat cada ~15 s. Si pasan 120 s
+# sin ningún dato el backend está colgado → reconectamos. connect/write
+# son rápidos (<10 s). pool es el slot del connection pool; alto para
+# no bloquear.
+_STREAM_TIMEOUT = httpx.Timeout(
+    connect=10.0, read=120.0, write=10.0, pool=30.0,
+)
 
 
 class BackendError(RuntimeError):
@@ -73,7 +80,7 @@ class BackendClient:
         attempts = 0
         while True:
             try:
-                async with httpx.AsyncClient(timeout=None) as client:
+                async with httpx.AsyncClient(timeout=_STREAM_TIMEOUT) as client:
                     async with client.stream("GET", url) as resp:
                         if resp.status_code >= 400:
                             raise BackendError(
@@ -94,7 +101,13 @@ class BackendClient:
                             buffer.append(line)
                         # stream closed cleanly
                         return
-            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as exc:
+            except (
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.ConnectError,
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+            ) as exc:
                 attempts += 1
                 if attempts > max_reconnects:
                     raise BackendError(f"SSE reconnect limit reached: {exc}") from exc

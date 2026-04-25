@@ -7,180 +7,324 @@ from dataclasses import dataclass
 class DubbingConfig:
     """All dubbing pipeline parameters in one place."""
 
-    # TTS (Chatterbox Multilingual)
-    # Valores orientados a ES natural sobre ref EN: baja guidance (cfg_weight
-    # 0.25-0.3 en synthesizer) desata Chatterbox del ritmo EN de la ref y
-    # deja salir prosodia ES propia. Mantenemos timbre porque eso depende
-    # del audio prompt, no del cfg_weight.
-    # 0.88: sweet spot validado auditivamente para coach pausado (Jozef
-    # Chen). 0.85 deja huecos. 0.92 suena raro/rápido. 0.88 puede
-    # extender el dub pasado el final del vídeo — se compensa activando
-    # allow_video_tail_extension (pad del último frame) en vez de acelerar.
-    tts_speed: float = 0.88
-    # temperature 0.65: compromiso entre voz neutra (baja temp = menos
-    # acentos raros, timbre más cerca de la ref) y evitar EOS premature.
-    # El synthesizer tiene retry escalado: si la primera pasada truncó,
-    # sube a 0.80 y luego 0.95 para variar tokens y esquivar el bug ES
-    # de Chatterbox (tokens comunes 6405/6324/4137/1034 disparan
-    # "repetition detection"). Así obtenemos voz limpia en el caso
-    # normal y cobertura anti-truncamiento sólo cuando hace falta.
-    tts_temperature: float = 0.65
+    # ------------------------------------------------------------------
+    # TTS (Coqui XTTS-v2)
+    # ------------------------------------------------------------------
+    # Voice cloning + code-switching ES/EN. The low-level ``Xtts`` API caches
+    # speaker conditioning latents per reference WAV, so every phrase in a
+    # chapter shares the same timbre. See ``tts/synthesizer_xttsv2.py``.
+
+    # Ronda 9 — Iter 3: vuelve a 1.05 (baseline). Iter 2 (1.02) no
+    # redujo los saltos de timbre — confirmando que son intrínsecos
+    # a XTTS y no dependen del pace. Mantenemos 1.05 por la fluidez
+    # percibida del baseline (ronda 8 logró MOS 1.5 con este valor).
+    tts_speed: float = 1.05
+    # 0.75 — RONDA 10: revertido desde 0.60 al DEFAULT oficial de XTTS.
+    # Las rondas 1-7 bajaron este valor persiguiendo la alucinación a chino
+    # pero la causa real era el code-switching (fixed R8) + un
+    # repetition_penalty absurdamente bajo (corregido en R10). Con 0.60 el
+    # sampler tiene pocas opciones viables y cuando el token ideal no
+    # encaja se encadena a tokens incoherentes → balbuceo que el usuario
+    # reportó en E02/E03. El default 0.75 es el probado por Coqui.
+    tts_temperature: float = 0.75
     target_language: str = "es"
-    # char_limit 260: menos cortes mid-frase. Cada chunk reinicia prosodia en
-    # Chatterbox, y juntar chunks con cross-fade suena robótico. Mejor una
-    # sola pasada por frase siempre que quepa.
-    tts_char_limit: int = 260
+    # Per-chunk char budget. 180 (antes 260) se alinea con merge_max_chars
+    # 160: si el splitter interno es más agresivo que el merge, ninguna
+    # frase fusionada llegará a la zona de contexto donde XTTS alucina
+    # o trunca el final. Inputs más largos se parten en puntuación por
+    # ``_split_long_text``.
+    tts_char_limit: int = 180
+    # Crossfade inside a phrase (between XTTS chunks of a long line).
     tts_crossfade_ms: int = 120
-    # Inter-phrase crossfade: short fade-out at the tail of TTS N and
-    # fade-in at the head of TTS N+1 when the real gap between them is
-    # small (< inter_phrase_crossfade_max_gap_ms). Smooths the classic
-    # "phrase. [silence] phrase." boundary that Chatterbox produces when
-    # every SRT block is synthesized independently.
-    inter_phrase_crossfade_ms: int = 100
+    # Crossfades between adjacent phrases (different TTS renders). The
+    # inter-phrase fade masks the small timbre/level discontinuity that
+    # remains after global level normalization. ``force_crossfade_ms``
+    # applies to boundaries the overlap resolver had to touch.
+    # 150 ms (antes 100) — cruces naturales entre frases cercanas más
+    # suaves, disimulan el salto de RMS residual tras RMS-norm.
+    # Ronda 9 Iter 3 probó 200 ms y empeoró hard_cuts (11→19) — el
+    # fade largo convierte warnings en hard_cuts porque expone más
+    # boundaries al ventaneo RMS/spectral del QA. 150 ms queda.
+    inter_phrase_crossfade_ms: int = 150
     inter_phrase_crossfade_max_gap_ms: int = 300
-    # Stronger crossfade for boundaries the overlap-resolver had to touch
-    # (two Chatterbox renders butted up against each other). 180 ms is
-    # enough for a smooth click-free join without muting hard consonants
-    # at phrase starts.
-    force_crossfade_ms: int = 180
-    # exaggeration 0.30: coach plano, menos teatral. Baja variación de
-    # énfasis entre chunks → menos "acentos raros" percibidos.
-    tts_exaggeration: float = 0.30
-    # repetition_penalty 1.45: compensa la bajada de temperature a 0.65.
-    # Con menos variedad del sampler necesitamos penalizar más fuerte la
-    # repetición real para esquivar el bug ES de Chatterbox (tokens
-    # comunes 6405/6324/4137/1034 disparando EOS premature). Si la
-    # primera pasada aún trunca, el retry sube penalty a 1.55/1.65.
-    tts_repetition_penalty: float = 1.45
-    # min_p/top_p abiertos: 0.02/1.0 permite al sampler escoger tokens menos
-    # probables cuando los top-k repiten (rompe ciclos de repetición que
-    # disparan EOS prematuro en Chatterbox ES).
-    tts_min_p: float = 0.02
-    tts_top_p: float = 1.0
-    # Legacy field (unused with Chatterbox but kept for back-compat)
-    tts_model_name: str = "chatterbox-multilingual"
+    # 320 ms (antes 250) — ronda 9: los saltos de timbre (centroid
+    # jump > 1200 Hz) son intrínsecos a XTTS (cada render tiene
+    # espectro propio). No podemos eliminarlos normalizando, pero un
+    # crossfade más largo los enmascara perceptivamente. Cap al 20%
+    # de la frase en mixer impide que este valor deforme frases
+    # cortas (una frase de 1.5 s queda capeada a 300 ms de fade,
+    # ok en la práctica). 350+ ms empieza a "tragarse" la cabeza de
+    # la frase siguiente en material rápido. Ronda 9 Iter 3 probó
+    # 400 ms y empeoró hard_cuts — fades excesivos exponen más
+    # ventanas al QA.
+    force_crossfade_ms: int = 320
+    # Tier 3 crossfade used when the pipeline's pairwise RMS leveling
+    # pass flags a boundary as ``rms_jump_boundary``. Longer than
+    # ``force_crossfade_ms`` because the boundary had a >6 dB delta even
+    # after per-segment RMS normalization. Set per-engine in app.py
+    # (ElevenLabs=550, XTTS keeps the default). None/0 = disabled.
+    rms_jump_crossfade_ms: int = 0
+    # 5.0 — RONDA 10: revertido desde 2.0. El default XTTS es 10.0.
+    # Rondas 1-7 pensaban "más alto = más penaliza repetición" y bajaron
+    # a 1.45 → 2.0 creyendo que endurecían, pero el efecto real fue
+    # PERMITIR repeticiones → el sampler se atascaba en bucles de
+    # tokens que luego colapsaban en balbuceo/chino. 5.0 es compromiso
+    # entre el default 10.0 (puede sonar algo entrecortado en ES) y el
+    # 2.0 roto anterior.
+    tts_repetition_penalty: float = 5.0
+    # 0.85 — RONDA 10: revertido a default XTTS. 0.80 cortaba el nucleus
+    # demasiado agresivamente en ES, donde los fonemas vocálicos largos
+    # necesitan más variabilidad para sonar naturales. Combinado con
+    # repetition_penalty 2.0 y temperature 0.60 producía el balbuceo
+    # reportado en E02/E03.
+    tts_top_p: float = 0.85
 
-    tts_engine: str = "xttsv2"
-
-    xtts_model_name: str = "tts_models/multilingual/multi-dataset/xtts_v2"
+    # Engine selector. Only 'elevenlabs' is supported — XTTS fields below
+    # are kept as dataclass defaults so DubbingConfig stays backwards-
+    # compatible with callers that reference them, but the code path is
+    # gone.
+    tts_engine: str = "elevenlabs"
+    xtts_model_name: str = ""
     xtts_config_path: str = ""
     xtts_checkpoint_dir: str = ""
     xtts_use_deepspeed: bool = False
-    xtts_code_switching: bool = True
+    # ES/EN code-switching: DESACTIVADO por defecto (ronda 8 — fix definitivo
+    # de alucinación a chino/japonés).
+    #
+    # Historial: durante rondas 1-7 esto estuvo ``True`` con un pipeline que
+    # partía cada línea SRT en spans ES/EN y llamaba ``inference()`` por chunk
+    # con ``language`` distinta. La idea era que "underhook" sonase con
+    # fonología inglesa. El problema: XTTS-v2 **no está diseñado para
+    # code-switching** — su parámetro ``language`` es single-value por
+    # inferencia y el GPT-autoregresivo arrastra estado entre llamadas. Al
+    # alternar es→en→es dentro de un mismo discurso, el sampler deja tokens
+    # residuales del idioma anterior; como XTTS soporta 16 idiomas
+    # (incluyendo zh-cn y ja) el decoder a veces colapsa a esos embeddings
+    # vecinos → alucinación a chino/japonés. Evidencia comunidad:
+    # coqui-ai/TTS discussions #4146, #104 en HF.
+    #
+    # Rondas 1-7 intentaron mitigarlo con: castellanización de compuestos
+    # (bjj_casting.py), reducción del set 1-palabra (bjj_en_terms.py),
+    # endurecimiento del sampler (temperature 0.60, top_p 0.80,
+    # repetition_penalty 2.0), cap de chunk (180 chars). Todas ayudaron
+    # pero ninguna eliminó al 100%. La ronda 7 QA seguía mostrando
+    # alucinación residual en términos 1-palabra aislados (underhook,
+    # guard, hook, kimura…).
+    #
+    # Fix definitivo: TODO el texto se sintetiza como single-span
+    # ``language="es"``. Los términos BJJ que queden escritos en EN
+    # (porque no estén en el mapa de castellanización) se pronuncian
+    # con fonemas ES. "kimura" suena ES-nativo igual; "underhook" suena
+    # "underjok" pero el oyente BJJ-literate lo reconoce igual. Esto es
+    # MUCHO más aceptable que cualquier alucinación. Cumple el
+    # invariante #4 del usuario ("NO alucinar") que tiene prioridad
+    # absoluta sobre fidelidad fonética marginal.
+    #
+    # ¡NO REACTIVAR SIN LEER ESTO! Si en el futuro aparece un XTTS-v3
+    # con code-switching real, o se migra a otro motor (CosyVoice, F5,
+    # Higgs), entonces reabrir el debate. Hasta entonces, ``False`` es
+    # la única configuración que garantiza cero alucinación.
+    xtts_code_switching: bool = False
     xtts_en_terms_extra: tuple[str, ...] = ()
 
+    # ------------------------------------------------------------------
+    # ElevenLabs (alternative cloud backend)
+    # ------------------------------------------------------------------
+    # Swap by setting ``tts_engine = "elevenlabs"``. API key is read from
+    # ``ELEVENLABS_API_KEY`` env var; voice_id is the pre-cloned speaker
+    # registered in the ElevenLabs dashboard (PVC / IVC). Unlike XTTS,
+    # reference_wav is ignored — the cloned voice lives on the provider.
+    elevenlabs_voice_id: str = "LlZr3QuzbW4WrPjgATHG"
+    elevenlabs_model_id: str = "eleven_multilingual_v2"
+    elevenlabs_stability: float = 0.5
+    elevenlabs_similarity_boost: float = 0.75
+    elevenlabs_style: float = 0.0
+    elevenlabs_use_speaker_boost: bool = True
+    # Output at 24 kHz PCM to match XTTS sample rate → the rest of the
+    # audio pipeline (mixer, stretcher, demucs) needs no change.
+    elevenlabs_output_format: str = "pcm_24000"
+    elevenlabs_api_key_env: str = "ELEVENLABS_API_KEY"
+    # HTTP timeout per request (seconds). Phrases are short so 60 s is
+    # generous; dubbing 2000-char episodes splits into ~30-50 calls.
+    elevenlabs_request_timeout: float = 60.0
+
+    # ------------------------------------------------------------------
+    # Piper (local ONNX TTS, free, no cloning)
+    # ------------------------------------------------------------------
+    # Spanish male voice from rhasspy/piper-voices. The model is baked
+    # into the dubbing-generator image at build time. ``length_scale``
+    # controls cadence (1.0 = native pace, >1 slower, <1 faster).
+    # ``noise_scale`` and ``noise_w`` control prosodic variability.
+    #
+    # Defaults tuneados para narración BJJ:
+    # - length_scale 0.95: cadencia ~5% más rápida que el default. El
+    #   default 1.0 mete pausas demasiado largas; <0.9 sonaba apresurado
+    #   y robótico.
+    # - noise_scale 0.75 (antes 0.667): más variación tonal — el default
+    #   sonaba "gangoso" en Piper-sharvard porque la prosodia era muy
+    #   plana. Subirlo aporta naturalidad orgánica al precio de leve
+    #   inestabilidad ocasional (aceptable en narración).
+    # - noise_w 0.85 (antes 0.6): variación de duración fonética cercana
+    #   al default Piper. Bajarlo demasiado homogeniza las pausas entre
+    #   palabras y suena robótico.
+    piper_model_path: str = "/models/piper/es_ES-sharvard-medium.onnx"
+    piper_length_scale: float = 0.95
+    piper_noise_scale: float = 0.75
+    piper_noise_w: float = 0.85
+
+    # ------------------------------------------------------------------
+    # Kokoro-82M (local StyleTTS2, voz preset ES, gratis, mejor prosodia)
+    # ------------------------------------------------------------------
+    # ``em_alex`` y ``em_santa`` son las dos voces masculinas ES nativas.
+    # Output 24 kHz mono nativo (no requiere resample).
+    # speed=1.0 default; <1 más lento, >1 más rápido.
+    kokoro_lang_code: str = "e"           # Spanish
+    kokoro_voice: str = "em_alex"
+    kokoro_speed: float = 1.0
+
+    # ------------------------------------------------------------------
     # Voice cloning
-    # Chatterbox cloning quality peaks at 8-15 s of clean ref speech. Going
-    # longer (the old 30 s) dilutes timbre coherence and increases the chance
-    # of capturing ref disfluencies that leak into the ES output.
+    # ------------------------------------------------------------------
+    # XTTS needs 6-15 s of clean reference speech. More hurts: extra
+    # duration dilutes timbre and picks up disfluencies from the clip.
     voice_sample_duration: float = 12.0
     use_model_voice: bool = False
     model_voice_path: str = ""
 
-    # Audio stretching — SRT ES literal puede ser 30-40% más largo que EN.
-    # Rango amplio [0.9, 1.30]: comprimimos hasta 1.30x si hace falta, pero
-    # tratamos de que el traductor ya compacte lo posible y sólo aceleremos
-    # puntualmente. 0.9 mínimo para rellenar huecos sin distorsionar.
-    max_compression_ratio: float = 1.40
-    min_compression_ratio: float = 0.85
+    # ------------------------------------------------------------------
+    # Time-stretching (fit TTS into SRT slots)
+    # ------------------------------------------------------------------
+    # ES is usually 15-30% longer than EN. El traductor presupuesta la
+    # mayor parte; el stretch absorbe el residuo. 1.25 (antes 1.30):
+    # bajamos el techo base para evitar que todas las frases suenen
+    # aceleradas — solo las del tramo final con deriva acumulada suben
+    # a ``tail_speed_nudge_max_ratio=1.35`` vía el nudge. Hasta 1.30
+    # es aceptable auditivamente; por encima de 1.35 la voz empieza
+    # a sonar acelerada y el stretcher pitch-preserving introduce
+    # artefactos F0 (saltos de pitch 100+ Hz en la QA).
+    max_compression_ratio: float = 1.25
+    min_compression_ratio: float = 0.90
     silence_threshold_db: float = -40.0
     silence_chunk_ms: int = 10
 
-    # Drift correction — stretch dinámico activado con rango conservador.
+    # ------------------------------------------------------------------
+    # Drift correction (density-based speed nudging)
+    # ------------------------------------------------------------------
+    # Off by default: with XTTS the natural pace already fits the slots
+    # most of the time, and dynamic speed changes between phrases were
+    # the main source of the "accelerates/brakes mid-chapter" artefact.
     drift_check_interval: int = 8
     drift_threshold_ms: float = 250.0
     speed_base: float = 1.0
     speed_min: float = 0.95
-    speed_max: float = 1.15
-    constant_speed: bool = False
+    speed_max: float = 1.10
+    constant_speed: bool = True
 
-    # Audio ducking — voz domina pero fondo audible (ambiente natural)
+    # ------------------------------------------------------------------
+    # Ducking (voice over background)
+    # ------------------------------------------------------------------
     ducking_bg_volume: float = 0.12    # ~-18 dB
     ducking_fg_volume: float = 1.6     # +4 dB TTS
     ducking_fade_ms: int = 180
-    # Mantener ducking sostenido si hay una pausa corta entre frases. Evita
-    # el efecto "frenazo" cuando el TTS sale más corto que el slot SRT: sin
-    # esto, el background sube a full volume durante el hueco y baja de
-    # golpe al arrancar la siguiente frase. Mergeamos regiones de ducking
-    # separadas por <=1500 ms para que el background quede bajo durante
-    # pausas breves, simulando el comportamiento de un coach real que
-    # pausa unos segundos entre explicaciones.
+    # Sustain the duck across short inter-phrase gaps so the background
+    # doesn't pump up/down between consecutive coach utterances.
     ducking_sustain_gap_ms: int = 1500
 
+    # ------------------------------------------------------------------
     # Sync / alignment
+    # ------------------------------------------------------------------
     lookahead_phrases: int = 5
     min_phrase_duration_ms: int = 600
-    avg_ms_per_char: float = 65.0       # español ~65 ms/char
-    inter_phrase_pad_ms: int = 20       # pausa mínima entre frases — prosodia más continua
-    tts_lead_silence_ms: int = 0        # sin silencio inicial — encadena con cola de la frase anterior
+    avg_ms_per_char: float = 65.0       # Spanish ≈ 65 ms/char
+    inter_phrase_pad_ms: int = 20       # minimum breathing room between phrases
+    tts_lead_silence_ms: int = 0        # no leading silence — prosody links with prev tail
 
-    # Sync — política industria: cuadrar con timestamps originales.
-    # El texto ES ya debe venir compactado por el traductor (iso-sincronía).
-    # Si sobra <=200 ms, pequeño stretch imperceptible lo absorbe.
-    max_overflow_ms: int = 200
+    # Industry-standard iso-synchrony. 250 ms es un techo pequeño que
+    # obliga a la tubería a estirar (compression) antes que acumular
+    # overflow. Con 600 ms las últimas frases arrastraban colas que al
+    # final del vídeo no tenían room para empujar → solapes masivos.
+    max_overflow_ms: int = 250
     shift_subsequent_on_overflow: bool = False
 
-    # Compact-silence: cuando el TTS sale más corto que el slot planificado,
-    # si el hueco final supera este umbral, desplazamos las frases
-    # posteriores hacia atrás para cerrar el silencio. Solo se activa con
-    # slots anchored a habla real (nivel 3 dub track); con SRT lectura
-    # mantendríamos las pausas intencionadas del subtítulo.
-    # Con merge_consecutive_blocks híbrido, los gaps restantes son pausas
-    # reales del speaker — no deben cerrarse o desalinean con el vídeo.
+    # Compact-trailing-silence: off with SRT-anchored input; the gaps are
+    # real coach pauses that must be preserved to keep lip sync.
     compact_trailing_silence: bool = False
     compact_trailing_silence_threshold_ms: int = 250
-    # Reservamos pad entre frases para que el compactado no pegue dos
-    # frases sin aire natural. Complementa inter_phrase_pad_ms.
     compact_min_gap_ms: int = 80
 
-    # Compactado "sintético" con guía de words.json: cuando el TTS generado
-    # acaba bastante antes del siguiente anchor, normalmente es porque
-    # Chatterbox ha clonado un ritmo más rápido que el speaker EN original
-    # → el slot tiene silencio que NO existe en el audio original. Si
-    # words.json confirma que el speaker seguía hablando en ese tramo,
-    # cerramos el hueco desplazando la siguiente frase. Si no hay palabras
-    # en el gap (pausa real del coach: cámara, gesto, respiración larga),
-    # dejamos el silencio intacto para preservar lip sync.
+    # Synthetic-silence compactor (words.json guided): when the TTS
+    # render finishes well before the next anchor and words.json shows
+    # the speaker was still talking in that gap, we pull the next phrase
+    # back. If words.json reports real silence (camera cut, long breath),
+    # the gap is preserved so lip sync doesn't drift.
     compact_synthetic_silence: bool = True
-    # Umbral a partir del cual consideramos que un hueco es "anómalo" y
-    # merece revisión contra words.json. Por debajo dejamos al mixer
-    # resolverlo con ducking sostenido. 600 ms evita tocar pausas
-    # naturales cortas (inhalación, coma prosódica).
     compact_synthetic_silence_threshold_ms: int = 600
-    # Fracción mínima del gap anómalo que words.json debe cubrir con
-    # habla para que consideremos el gap sintético. 0.70 = al menos 70%
-    # del hueco tiene palabras del speaker → cerrar. Por debajo, asumimos
-    # que es una pausa real aunque haya alguna palabra suelta al borde.
     compact_synthetic_min_speech_ratio: float = 0.70
-    # Pad mínimo entre frases tras el compactado (aire natural). 200 ms
-    # también enmascara mejor los saltos RMS entre frases Chatterbox que
-    # quedarían pegadas con un pad demasiado corto.
     compact_synthetic_min_gap_ms: int = 200
-    # Safety rail de lip sync: ninguna frase puede acabar anclada más de
-    # este margen antes de su anchor original (el ``original_start_ms``
-    # que heredó de la alineación SRT/words). Si cerrar un gap requiere
-    # mover la siguiente frase más de esto, limitamos el shift y el
-    # silencio restante se deja tal cual — preferimos un silencio
-    # intermedio a un desfase de lip sync perceptible. Cascada: una vez
-    # una frase queda capada, las siguientes arrastran el mismo offset
-    # efectivo respecto a su anchor.
+    # Lip-sync safety rail: no phrase can be dragged more than this
+    # before its original anchor. Protects the speaker's face from going
+    # out of sync when compactor passes chain up.
     compact_synthetic_max_drift_ms: int = 400
-    # Desactivado: el vídeo termina donde termina; no extendemos.
-    allow_video_tail_extension: bool = False
-    video_tail_extension_max_ms: int = 0
+    # Tail extension: permitimos que el audio final exceda la duración
+    # del vídeo hasta ``video_tail_extension_max_ms`` para no perder la
+    # última frase. Bajado de 8000 → 3000 ms tras ver que con 8s el
+    # usuario notaba 8s de deriva al final del capítulo (el pipeline
+    # usaba TODO el margen disponible). 3000 ms cubre la última frase
+    # ES larga típica (~150 chars) sin producir deriva perceptible.
+    # El nudge de speed en el tramo final (``tail_speed_nudge_*``)
+    # absorbe el exceso cuando 3 s no bastarían.
+    allow_video_tail_extension: bool = True
+    # R11: 6000 ms. El tail=1500 (R10.2) truncaba contenido: el usuario
+    # confirmó "acabó en bloque 30 pero quedaba 31 por decir". Con 6000
+    # ms el último bloque SRT cabe completo incluso si dura 4-6 s más
+    # que su slot original. El nudge ataca el problema desde 30 s antes
+    # para que la mayoría de frases finales NO necesiten este margen —
+    # 6 s es un backstop, no el objetivo. Usuario prioriza no perder
+    # información > deriva visual corta pantalla negra.
+    video_tail_extension_max_ms: int = 6000
 
-    # Hybrid merge (opción 3): agrupa líneas SRT consecutivas con hueco
-    # pequeño en un único bloque TTS. El TTS habla con prosodia continua
-    # (menos cortes robóticos) pero el bloque sigue anclado al timestamp
-    # del vídeo (start = primera línea, end = última línea). Basado en
-    # `.es.srt` literal alineado con vídeo, no en segmenter nivel 3.
-    # Merge desactivado: Chatterbox fuerza EOS prematuro con textos largos
-    # (~200 chars) al detectar repetición de tokens → TTS se corta en mitad
-    # de la frase → huecos. Mantenemos 1 línea SRT = 1 TTS, más cortos y
-    # robustos. Aligner + stretcher absorben sync.
-    merge_consecutive_blocks: bool = False
+    # Anti-deriva final: cuando las frases caen en el último
+    # ``tail_speed_nudge_window_ms`` del vídeo y la posición donde
+    # termina la frase excede el slot SRT por más de
+    # ``tail_speed_nudge_trigger_ms``, aceleramos la compresión
+    # hasta ``tail_speed_nudge_max_ratio`` para reabsorber el
+    # retraso antes del final del vídeo. Sin esto, la única válvula
+    # era ``video_tail_extension`` → el vídeo se alargaba en vez de
+    # comprimir.
+    #
+    # 1.35 (antes 1.40): a 1.40x el stretcher pitch-preserving
+    # introducía artefactos F0 perceptibles (QA reportaba saltos
+    # de pitch 100+ Hz en las últimas frases). 1.35 sigue permitiendo
+    # reabsorber ~800 ms de deriva por frase sin llegar a la zona
+    # donde el pitch se pierde. Base 1.25 + nudge 1.35 = el nudge
+    # sólo sube 10% sobre el ratio base, imperceptible.
+    # R11: nudge aún más agresivo — 45 s de ventana para prevenir
+    # acumulación, trigger a 400 ms (reacciona antes), max_ratio 1.45
+    # (el stretch pitch-preserving sigue aceptable hasta 1.50). La
+    # mayoría de frases finales deberían caber con stretch 1.0-1.15;
+    # solo cuando se acumula mucha deriva sube a 1.45 y el oyente
+    # percibirá aceleración leve en las últimas 3-5 frases — mejor
+    # eso que perder contenido o tener 6 s de pantalla negra.
+    tail_speed_nudge_window_ms: int = 45000
+    tail_speed_nudge_trigger_ms: int = 400
+    tail_speed_nudge_max_ratio: float = 1.45
+
+    # Merge híbrido: ACTIVO. El usuario reporta "frase tras frase sin
+    # continuidad" — síntoma clásico de XTTS renderizando cada SRT block
+    # como inferencia independiente (el GPT-latent reinicia prosodia
+    # entre bloques). Uniendo pares/tríos con gap <= 400 ms en un solo
+    # prompt, el modelo mantiene entonación continua y los límites
+    # resultantes son mucho menos "cortados".
+    #
+    # Cap 160 chars (antes 200): prompts más cortos reducen la ventana
+    # en la que XTTS se desvía a otros idiomas (cap2 alucinaba a chino
+    # en los merges largos). 160 cubre 2-3 frases cortas sin entrar en
+    # zona de riesgo.
+    merge_consecutive_blocks: bool = True
     merge_max_gap_ms: int = 400
-    merge_max_chars: int = 200
+    merge_max_chars: int = 160
 
+    # ------------------------------------------------------------------
     # Paths / file discovery
+    # ------------------------------------------------------------------
     extensions: tuple[str, ...] = (".mp4", ".mkv", ".avi", ".mov")

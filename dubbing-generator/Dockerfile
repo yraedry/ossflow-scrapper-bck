@@ -6,7 +6,7 @@ FROM bjj-base:latest
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-        rubberband-cli
+        rubberband-cli wget espeak-ng
 
 COPY bjj_service_kit /app/bjj_service_kit
 COPY dubbing-generator/requirements.txt /app/requirements.txt
@@ -21,10 +21,18 @@ RUN --mount=type=cache,target=/root/.cache/pip \
       \( -name "tests" -o -name "test" -o -name "docs" -o -name "examples" \) \
       -exec rm -rf {} + 2>/dev/null || true
 
+RUN mkdir -p /models/piper && cd /models/piper && \
+    wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx && \
+    wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx.json
+
+# Pre-cache Kokoro-82M model + ES voices into HF cache. Lazy load at first
+# inference would otherwise hit the network from inside the running service.
+RUN python3 -c "from kokoro import KPipeline; KPipeline(lang_code='e')" || true
+
 COPY dubbing-generator /app/dubbing-generator
 WORKDIR /app/dubbing-generator
 
-# Chatterbox downloads model weights to HF cache on first use (~2GB)
+# HF cache still used by torch hub (silero-vad en VoiceCloner) y demucs.
 ENV HF_HOME=/models/huggingface \
     TRANSFORMERS_CACHE=/models/huggingface
 

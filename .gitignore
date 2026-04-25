@@ -1,9 +1,25 @@
 # Created by https://www.toptal.com/developers/gitignore/api/python,node
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,node
 
+# --- Project-specific (BJJ processor) ---
+
+# Runtime settings (contain real API keys — NEVER commit)
+**/_settings.json
+
+# Playwright MCP captures
+.playwright-mcp/
+
+# Runtime pytest state
+**/.pytest_config/
+
+# Voice samples (large binaries, not source-of-truth)
+dubbing-generator/voices/
+
 ### Node ###
 # Logs
 logs
+!processor-frontend/src/features/logs/
+!processor-frontend/src/features/logs/**
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -159,6 +175,10 @@ downloads/
 eggs/
 .eggs/
 lib/
+!processor-frontend/src/lib/
+!processor-frontend/src/lib/**
+!processor-frontend/src/features/oracle/lib/
+!processor-frontend/src/features/oracle/lib/**
 lib64/
 parts/
 sdist/

@@ -8,6 +8,8 @@ psutil>=5.9
 Pillow>=10.0
 sqlalchemy>=2.0
 alembic>=1.13
+# ElevenLabs Dubbing Studio E2E (api/elevenlabs_dubbing.py)
+elevenlabs>=1.0
 
 # dev / test
 pytest>=7.4.0

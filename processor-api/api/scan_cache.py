@@ -1,12 +1,19 @@
 """Cache for library scan results.
 
 Single responsibility: persist the last scan output in library.json.
+
+Concurrencia: lectura/escritura protegidas por ``threading.Lock`` y
+escritura atómica vía ``os.replace`` — sin esto un lector podía leer
+``{}`` mientras otra request terminaba de escribir, y dos escrituras
+concurrentes dejaban la más vieja en disco.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -24,6 +31,7 @@ class ScanCache:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
+        self._lock = threading.Lock()
 
     def _ensure_dir(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -32,21 +40,23 @@ class ScanCache:
         return self.path.exists()
 
     def load(self) -> Optional[dict[str, Any]]:
-        if not self.path.exists():
-            return None
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            log.warning("Failed to load scan cache %s: %s", self.path, exc)
-            return None
+        with self._lock:
+            if not self.path.exists():
+                return None
+            try:
+                return json.loads(self.path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                log.warning("Failed to load scan cache %s: %s", self.path, exc)
+                return None
 
     def save(self, instructionals: list[dict[str, Any]]) -> None:
-        self._ensure_dir()
-        payload = {"instructionals": instructionals}
-        self.path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        with self._lock:
+            self._ensure_dir()
+            payload = {"instructionals": instructionals}
+            text = json.dumps(payload, indent=2, ensure_ascii=False)
+            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self.path)
 
 
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
@@ -96,12 +106,19 @@ def find_poster_cached(folder: Path, poster_filename: Optional[str]) -> Optional
 
 
 def enrich_with_poster(instructionals: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Add has_poster + poster_filename fields to each item (in place-friendly)."""
+    """Add has_poster + poster_filename + poster_mtime fields to each item."""
     for item in instructionals:
         folder = item.get("path")
         poster = find_poster(Path(folder)) if folder else None
         item["has_poster"] = poster is not None
         item["poster_filename"] = poster.name if poster else None
+        if poster is not None:
+            try:
+                item["poster_mtime"] = int(poster.stat().st_mtime)
+            except OSError:
+                item["poster_mtime"] = None
+        else:
+            item["poster_mtime"] = None
     return instructionals
 
 
@@ -127,6 +144,14 @@ def patch_poster_in_cache(
         if item.get("name") == instructional_name:
             item["has_poster"] = bool(poster_filename)
             item["poster_filename"] = poster_filename
+            mtime_val: Optional[int] = None
+            folder = item.get("path")
+            if poster_filename and folder:
+                try:
+                    mtime_val = int((Path(folder) / poster_filename).stat().st_mtime)
+                except OSError:
+                    mtime_val = None
+            item["poster_mtime"] = mtime_val
             changed = True
             break
     if changed:

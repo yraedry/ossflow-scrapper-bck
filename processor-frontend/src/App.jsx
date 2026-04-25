@@ -6,6 +6,7 @@ import InstructionalDetailPage from './features/library/pages/InstructionalDetai
 import InstructionalOraclePage from './features/oracle/pages/InstructionalOraclePage'
 import PipelinesListPage from './features/pipeline/pages/PipelinesListPage'
 import PipelineDetailPage from './features/pipeline/pages/PipelineDetailPage'
+import ElevenLabsPage from './features/elevenlabs/pages/ElevenLabsPage'
 import SearchPage from './features/search/pages/SearchPage'
 import LogsPage from './features/logs/pages/LogsPage'
 import VoicesPage from './features/voices/pages/VoicesPage'
@@ -31,6 +32,7 @@ const router = createBrowserRouter([
       { path: '/library/:name/oracle', element: <InstructionalOraclePage /> },
       { path: '/pipelines', element: <PipelinesListPage /> },
       { path: '/pipelines/:id', element: <PipelineDetailPage /> },
+      { path: '/elevenlabs', element: <ElevenLabsPage /> },
       { path: '/search', element: <SearchPage /> },
       { path: '/logs', element: <LogsPage /> },
       { path: '/voices', element: <VoicesPage /> },
