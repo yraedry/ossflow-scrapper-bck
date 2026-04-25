@@ -354,11 +354,11 @@ ES: "Usa el butterfly hook para hacer el sweep."
 """
 
 
-class OpenAITranslator(_BaseTranslator):
-    """Translate SRT files via OpenAI Chat Completions (gpt-4o-mini default).
+class _BaseChatTranslator(_BaseTranslator):
+    """Shared logic for chat-completion-style providers (OpenAI, Ollama).
 
-    Batches subtitle items into a single JSON request for coherence and cost.
-    Uses ``response_format=json_object`` for reliable parsing.
+    Subclases implementan 4 métodos abstractos para diferenciar dialecto HTTP.
+    El cuerpo de retry/feedback/prompts queda compartido aquí.
     """
 
     # Number of subtitle items per request. 40 is a sweet spot:
@@ -366,29 +366,27 @@ class OpenAITranslator(_BaseTranslator):
     # - keeps context coherent
     # - well under any token limit even for long lines
     _BATCH_SIZE = 40
+    _MAX_RETRIES = 2
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str = "gpt-4o-mini",
-        source_lang: str = "EN",
-        target_lang: str = "ES",
-        temperature: float = 0.2,
-        base_url: str | None = None,
-    ) -> None:
-        super().__init__(source_lang, target_lang)
-        key = api_key or os.environ.get("OPENAI_API_KEY")
-        if not key:
-            raise ValueError("OPENAI_API_KEY not provided (env or constructor)")
-        self.api_key = key
-        self.model = model
-        self.temperature = temperature
-        self.url = (base_url or OPENAI_URL).rstrip("/")
-        # If base_url was passed without the /chat/completions suffix, fix it.
-        if not self.url.endswith("/chat/completions"):
-            if self.url.endswith("/v1"):
-                self.url = f"{self.url}/chat/completions"
+    # Subclases setean estos en __init__:
+    model: str
+    temperature: float
+    provider_label: str
 
+    # ---- API HTTP a implementar por subclases ----
+    def _endpoint_url(self) -> str:
+        raise NotImplementedError
+
+    def _request_headers(self) -> dict:
+        raise NotImplementedError
+
+    def _wrap_chat_body(self, messages: list[dict], json_mode: bool) -> dict:
+        raise NotImplementedError
+
+    def _extract_message_content(self, resp_json: dict) -> str:
+        raise NotImplementedError
+
+    # ---- Lógica compartida ----
     def translate_texts(self, texts: list[str]) -> list[str]:
         if not texts:
             return []
@@ -439,49 +437,47 @@ class OpenAITranslator(_BaseTranslator):
                     out.extend(self._translate_dubbing_batch([item], cps, fill_budget))
         return out
 
-    _MAX_RETRIES = 2
-
     def _translate_batch(self, texts: list[str]) -> list[str]:
         system = _BJJ_SYSTEM_PROMPT.format(
             src_name=_lang_name(self.source_lang),
             tgt_name=_lang_name(self.target_lang),
         )
         user_payload = {"items": texts}
-        body = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": (
-                        "Translate each item in `items`. Return JSON "
-                        '{"t": [...]} with the same number of items in the same order.\n'
-                        + json.dumps(user_payload, ensure_ascii=False)
-                    ),
-                },
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    "Translate each item in `items`. Return JSON "
+                    '{"t": [...]} with the same number of items in the same order.\n'
+                    + json.dumps(user_payload, ensure_ascii=False)
+                ),
+            },
+        ]
+        body = self._wrap_chat_body(messages, json_mode=True)
+        headers = self._request_headers()
 
         last_err: Exception | None = None
         for attempt in range(1 + self._MAX_RETRIES):
             r = _post_with_retry(
-                self.url, headers=headers, json_body=body, provider_label="OpenAI",
+                self._endpoint_url(),
+                headers=headers,
+                json_body=body,
+                provider_label=self.provider_label,
             )
             if r.status_code >= 400:
-                raise RuntimeError(f"OpenAI error {r.status_code}: {r.text[:300]}")
+                raise RuntimeError(
+                    f"{self.provider_label} error {r.status_code}: {r.text[:300]}"
+                )
 
             data = r.json()
             try:
-                content = data["choices"][0]["message"]["content"]
+                content = self._extract_message_content(data)
                 parsed = json.loads(content)
             except (KeyError, IndexError, json.JSONDecodeError) as exc:
-                raise RuntimeError(f"OpenAI response parse failed: {exc}") from exc
+                raise RuntimeError(
+                    f"{self.provider_label} response parse failed: {exc}"
+                ) from exc
 
             items = parsed.get("t")
             if not isinstance(items, list):
@@ -490,11 +486,11 @@ class OpenAITranslator(_BaseTranslator):
                 return [str(x) for x in items]
 
             last_err = RuntimeError(
-                f"OpenAI returned {len(items) if isinstance(items, list) else 'non-list'} items, "
+                f"{self.provider_label} returned {len(items) if isinstance(items, list) else 'non-list'} items, "
                 f"expected {len(texts)}"
             )
-            log.warning("OpenAI count mismatch (attempt %d/%d), retrying…",
-                        attempt + 1, 1 + self._MAX_RETRIES)
+            log.warning("%s count mismatch (attempt %d/%d), retrying…",
+                        self.provider_label, attempt + 1, 1 + self._MAX_RETRIES)
 
         raise last_err  # type: ignore[misc]
 
@@ -542,38 +538,38 @@ class OpenAITranslator(_BaseTranslator):
             'Return JSON {"t": [...]} with the same number of items in the '
             "same order.\n"
         )
-        body = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": (
-                        user_instruction
-                        + json.dumps({"items": payload_items}, ensure_ascii=False)
-                    ),
-                },
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    user_instruction
+                    + json.dumps({"items": payload_items}, ensure_ascii=False)
+                ),
+            },
+        ]
+        body = self._wrap_chat_body(messages, json_mode=True)
+        headers = self._request_headers()
 
         last_err: Exception | None = None
         for attempt in range(1 + self._MAX_RETRIES):
             r = _post_with_retry(
-                self.url, headers=headers, json_body=body, provider_label="OpenAI",
+                self._endpoint_url(),
+                headers=headers,
+                json_body=body,
+                provider_label=self.provider_label,
             )
             if r.status_code >= 400:
-                raise RuntimeError(f"OpenAI error {r.status_code}: {r.text[:300]}")
+                raise RuntimeError(
+                    f"{self.provider_label} error {r.status_code}: {r.text[:300]}"
+                )
             try:
-                content = r.json()["choices"][0]["message"]["content"]
+                content = self._extract_message_content(r.json())
                 parsed = json.loads(content)
             except (KeyError, IndexError, json.JSONDecodeError) as exc:
-                raise RuntimeError(f"OpenAI response parse failed: {exc}") from exc
+                raise RuntimeError(
+                    f"{self.provider_label} response parse failed: {exc}"
+                ) from exc
 
             result = parsed.get("t")
             if not isinstance(result, list):
@@ -581,7 +577,7 @@ class OpenAITranslator(_BaseTranslator):
             if not (isinstance(result, list) and len(result) == len(items)):
                 got = len(result) if isinstance(result, list) else "non-list"
                 last_err = RuntimeError(
-                    f"OpenAI returned non-matching count "
+                    f"{self.provider_label} returned non-matching count "
                     f"({got} vs {len(items)})"
                 )
                 # Feedback retry: tell the model the count is wrong so it
@@ -685,6 +681,60 @@ class OpenAITranslator(_BaseTranslator):
         if last_err:
             raise last_err
         return result
+
+
+class OpenAITranslator(_BaseChatTranslator):
+    """Translate SRT files via OpenAI Chat Completions (gpt-4o-mini default).
+
+    Batches subtitle items into a single JSON request for coherence and cost.
+    Uses ``response_format=json_object`` for reliable parsing.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gpt-4o-mini",
+        source_lang: str = "EN",
+        target_lang: str = "ES",
+        temperature: float = 0.2,
+        base_url: str | None = None,
+    ) -> None:
+        super().__init__(source_lang, target_lang)
+        key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise ValueError("OPENAI_API_KEY not provided (env or constructor)")
+        self.api_key = key
+        self.model = model
+        self.temperature = temperature
+        self.provider_label = "OpenAI"
+        url = (base_url or OPENAI_URL).rstrip("/")
+        # If base_url was passed without the /chat/completions suffix, fix it.
+        if not url.endswith("/chat/completions"):
+            if url.endswith("/v1"):
+                url = f"{url}/chat/completions"
+        self.url = url
+
+    def _endpoint_url(self) -> str:
+        return self.url
+
+    def _request_headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _wrap_chat_body(self, messages: list[dict], json_mode: bool) -> dict:
+        body = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "messages": messages,
+        }
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        return body
+
+    def _extract_message_content(self, resp_json: dict) -> str:
+        return resp_json["choices"][0]["message"]["content"]
 
 
 # ---------------------------------------------------------------------------
