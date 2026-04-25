@@ -1,4 +1,4 @@
-"""SRT translation with pluggable providers (OpenAI, DeepL).
+"""SRT translation with pluggable providers (Ollama local, OpenAI cloud).
 
 Preserves timestamps and subtitle structure. Writes ``{base}_ES.srt`` next
 to the source file.
@@ -22,8 +22,6 @@ from .srt_io import parse_srt, serialize_srt
 
 log = logging.getLogger("subtitler")
 
-DEEPL_FREE_URL = "https://api-free.deepl.com/v2/translate"
-DEEPL_PRO_URL = "https://api.deepl.com/v2/translate"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 _TIMEOUT = 120.0
@@ -155,64 +153,6 @@ class _BaseTranslator:
         dst_path.write_text(serialize_srt(subs), encoding="utf-8")
         log.info("Wrote %d translated subtitles to %s", len(subs), dst_path.name)
         return dst_path
-
-
-# ---------------------------------------------------------------------------
-# DeepL provider
-# ---------------------------------------------------------------------------
-
-class DeepLTranslator(_BaseTranslator):
-    """Translate SRT files using the DeepL REST API."""
-
-    _BATCH_SIZE = 40
-
-    def __init__(
-        self,
-        api_key: str | None = None,
-        source_lang: str = "EN",
-        target_lang: str = "ES",
-        formality: str | None = None,
-        pro: bool | None = None,
-    ) -> None:
-        super().__init__(source_lang, target_lang)
-        key = api_key or os.environ.get("DEEPL_API_KEY")
-        if not key:
-            raise ValueError("DEEPL_API_KEY not provided (env or constructor)")
-        self.api_key = key
-        self.formality = formality
-        if pro is None:
-            pro = not key.endswith(":fx")
-        self.url = DEEPL_PRO_URL if pro else DEEPL_FREE_URL
-
-    def translate_texts(self, texts: list[str]) -> list[str]:
-        if not texts:
-            return []
-        out: list[str] = []
-        for chunk in _chunks(texts, self._BATCH_SIZE):
-            out.extend(self._post(chunk))
-        return out
-
-    def _post(self, texts: list[str]) -> list[str]:
-        payload: dict[str, str | list[str]] = {
-            "source_lang": self.source_lang,
-            "target_lang": self.target_lang,
-            "preserve_formatting": "1",
-            "split_sentences": "0",
-            "text": texts,
-        }
-        if self.formality:
-            payload["formality"] = self.formality
-
-        headers = {
-            "Authorization": f"DeepL-Auth-Key {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        r = _post_with_retry(
-            self.url, headers=headers, json_body=payload, provider_label="DeepL",
-        )
-        if r.status_code >= 400:
-            raise RuntimeError(f"DeepL error {r.status_code}: {r.text[:300]}")
-        return [t["text"] for t in r.json().get("translations", [])]
 
 
 # ---------------------------------------------------------------------------
