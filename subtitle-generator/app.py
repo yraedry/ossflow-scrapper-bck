@@ -434,11 +434,18 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
                         f"{provider_name} dub-compact failed on {srt.name}: {exc}"
                     }))
                     if fallback is not None:
+                        from subtitle_generator.translator import _BaseChatTranslator  # type: ignore
                         try:
-                            fallback.translate_srt(srt, sub_out)
-                            emit(JobEvent(type="log", data={"message":
-                                f"translated subs via fallback {fb_name} (literal): {srt.name}"
-                            }))
+                            if isinstance(fallback, _BaseChatTranslator):
+                                _translate_for_dubbing(fallback, srt, sub_out, cps, force_slot_mode=False)
+                                emit(JobEvent(type="log", data={"message":
+                                    f"translated subs via fallback {fb_name} (dub-aware): {srt.name}"
+                                }))
+                            else:
+                                fallback.translate_srt(srt, sub_out)
+                                emit(JobEvent(type="log", data={"message":
+                                    f"translated subs via fallback {fb_name} (literal): {srt.name}"
+                                }))
                         except Exception as exc2:
                             emit(JobEvent(type="log", data={"message":
                                 f"ERROR fallback {fb_name} also failed on {srt.name}: {exc2}"
