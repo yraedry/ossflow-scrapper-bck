@@ -767,6 +767,46 @@ class OpenAITranslator(_BaseChatTranslator):
         return resp_json["choices"][0]["message"]["content"]
 
 
+class OllamaTranslator(_BaseChatTranslator):
+    """Translate via Ollama native /api/chat with strict JSON mode."""
+
+    def __init__(
+        self,
+        model: str = "qwen2.5:7b-instruct-q4_K_M",
+        source_lang: str = "EN",
+        target_lang: str = "ES",
+        temperature: float = 0.2,
+        base_url: str | None = None,
+    ) -> None:
+        super().__init__(source_lang, target_lang)
+        self.model = model
+        self.temperature = temperature
+        self.provider_label = "Ollama"
+        self.base_url = (
+            base_url or os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+        ).rstrip("/")
+
+    def _endpoint_url(self) -> str:
+        return f"{self.base_url}/api/chat"
+
+    def _request_headers(self) -> dict[str, str]:
+        return {"Content-Type": "application/json"}
+
+    def _wrap_chat_body(self, messages: list[dict], json_mode: bool) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": self.temperature},
+        }
+        if json_mode:
+            body["format"] = "json"
+        return body
+
+    def _extract_message_content(self, resp_json: dict[str, Any]) -> str:
+        return resp_json["message"]["content"]
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
@@ -782,19 +822,18 @@ def make_translator(
 ) -> _BaseTranslator:
     """Build a translator for the requested provider name."""
     p = (provider or "").lower().strip()
+    if p == "ollama":
+        return OllamaTranslator(
+            model=model or "qwen2.5:7b-instruct-q4_K_M",
+            source_lang=source_lang,
+            target_lang=target_lang,
+        )
     if p in ("openai", "gpt", "chatgpt"):
         return OpenAITranslator(
             api_key=api_key,
             model=model or "gpt-4o-mini",
             source_lang=source_lang,
             target_lang=target_lang,
-        )
-    if p in ("deepl",):
-        return DeepLTranslator(
-            api_key=api_key,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            formality=formality,
         )
     raise ValueError(f"Unknown translation provider: {provider!r}")
 
