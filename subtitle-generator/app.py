@@ -48,7 +48,7 @@ class TranslateRequest(BaseModel):
     srt_path: str
     target_lang: str = "ES"
     source_lang: str = "EN"
-    provider: str = "openai"
+    provider: str = "ollama"
     model: str | None = None
     formality: str | None = None
     api_key: str | None = None
@@ -255,7 +255,7 @@ def _translate_for_dubbing(
     literal ``.es.srt`` track used both by subtitles and by the dubbing
     pipeline).
 
-    Only supported when ``primary`` is OpenAITranslator (budget prompt-based).
+    Only supported when ``primary`` is a chat-based translator (Ollama or OpenAI, budget prompt-based).
     """
     from subtitle_generator.srt_io import parse_srt, serialize_srt  # type: ignore
     from subtitle_generator.translator import _BaseChatTranslator  # type: ignore
@@ -378,7 +378,7 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
 
     with emit_logs(emit, level=level):
         primary, fallback = _build_translator_with_fallback(opts)
-        provider_name = (opts.get("provider") or "openai").lower()
+        provider_name = (opts.get("provider") or "ollama").lower()
         fb_name = (opts.get("fallback_provider") or "").lower() or None
         force = bool(opts.get("force"))
 

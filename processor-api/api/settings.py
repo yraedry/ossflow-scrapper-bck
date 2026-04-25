@@ -46,7 +46,7 @@ _DEFAULTS: dict[str, Any] = {
     "translation_fallback_provider": "openai",
     # Industry-standard iso-synchronous translation: the translator compacts
     # each ES line to fit the SRT slot so TTS comes out on-time without audio
-    # stretch. Only works with OpenAI provider (budget-aware prompt).
+    # stretch. Works with chat-based providers (Ollama or OpenAI, both budget-aware).
     "translation_dubbing_mode": True,
     "translation_dubbing_cps": 17.0,   # R12: 17 (antes 13). Con tts_engine=elevenlabs la prosodia cloud aguanta densidad Netflix-grade (17 cps es el estándar ES profesional). XTTS requería 13 porque su speed=1.05 fijo no absorbía texto largo sin sonar robótico; ElevenLabs multilingual_v2 pronuncia a cadencia natural y deja el stretcher del pipeline para ajustes finos de slot. Para volver a XTTS, bajar a 13.
     # Motor TTS: "elevenlabs" (cloud, voice cloning, paid) o "piper"

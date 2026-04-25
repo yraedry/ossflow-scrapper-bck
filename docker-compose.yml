@@ -9,6 +9,7 @@
 #   - chapter-splitter:    OCR + split (GPU)       → :8001
 #   - subtitle-generator:  WhisperX (GPU)          → :8002
 #   - dubbing-generator:   ElevenLabs cloud TTS    → :8003
+#   - ollama:              LLM local (qwen2.5-7b)  → :11434
 #
 # Variables:
 #   LIBRARY_PATH  → ruta host con los instruccionales (default /mnt/library)
