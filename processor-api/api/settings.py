@@ -40,11 +40,10 @@ _DEFAULTS: dict[str, Any] = {
     "custom_prompts": {},
     "telegram_api_id": None,
     "telegram_api_hash": None,
-    "deepl_api_key": None,
     "openai_api_key": None,
-    "translation_provider": "openai",
-    "translation_model": "gpt-4o",
-    "translation_fallback_provider": "deepl",
+    "translation_provider": "ollama",
+    "translation_model": "qwen2.5:7b-instruct-q4_K_M",
+    "translation_fallback_provider": "openai",
     # Industry-standard iso-synchronous translation: the translator compacts
     # each ES line to fit the SRT slot so TTS comes out on-time without audio
     # stretch. Only works with OpenAI provider (budget-aware prompt).
@@ -87,6 +86,7 @@ def _ensure_initialized() -> None:
     except Exception as exc:
         log.warning("init_db failed: %s", exc)
     _maybe_import_legacy_json()
+    _migrate_legacy_translation_settings()
     _initialized = True
 
 
@@ -109,6 +109,32 @@ def _maybe_import_legacy_json() -> None:
         log.info("Imported legacy settings.json → DB (backup at %s)", backup)
     except Exception as exc:
         log.warning("Legacy settings import failed: %s", exc)
+
+
+def _migrate_legacy_translation_settings() -> None:
+    """One-shot rewrite de valores legacy (deepl → ollama). Idempotente.
+
+    Solo migra si el usuario tenía explícitamente DeepL configurado. Respeta
+    a quien tenga ``translation_provider="openai"`` (no fuerza Ollama).
+    """
+    try:
+        with session_scope() as s:
+            row = s.get(Setting, "translation_provider")
+            if row is not None and json.loads(row.value) == "deepl":
+                row.value = json.dumps("ollama")
+                model_row = s.get(Setting, "translation_model")
+                if model_row is not None:
+                    model_row.value = json.dumps("qwen2.5:7b-instruct-q4_K_M")
+
+            fb_row = s.get(Setting, "translation_fallback_provider")
+            if fb_row is not None and json.loads(fb_row.value) == "deepl":
+                fb_row.value = json.dumps("openai")
+
+            deepl_row = s.get(Setting, "deepl_api_key")
+            if deepl_row is not None:
+                s.delete(deepl_row)
+    except Exception as exc:
+        log.warning("legacy translation settings migration failed: %s", exc)
 
 
 def load_settings() -> dict[str, Any]:
@@ -219,24 +245,35 @@ async def put_settings(request: Request):
                 return JSONResponse({"error": "telegram_api_hash must be a 32-char hex string or null"}, status_code=422)
         current["telegram_api_hash"] = th
 
-    if "deepl_api_key" in body:
-        dk = body["deepl_api_key"]
-        if dk is not None and not isinstance(dk, str):
-            return JSONResponse({"error": "deepl_api_key must be a string or null"}, status_code=422)
-        current["deepl_api_key"] = dk.strip() if isinstance(dk, str) else dk
-
     if "openai_api_key" in body:
         ok = body["openai_api_key"]
         if ok is not None and not isinstance(ok, str):
             return JSONResponse({"error": "openai_api_key must be a string or null"}, status_code=422)
         current["openai_api_key"] = ok.strip() if isinstance(ok, str) else ok
 
-    for k in ("translation_provider", "translation_model", "translation_fallback_provider"):
-        if k in body:
-            v = body[k]
-            if v is not None and not isinstance(v, str):
-                return JSONResponse({"error": f"{k} must be a string or null"}, status_code=422)
-            current[k] = v.strip() if isinstance(v, str) else v
+    if "translation_provider" in body:
+        val = body["translation_provider"]
+        if val not in ("ollama", "openai"):
+            return JSONResponse(
+                {"error": "translation_provider must be 'ollama' or 'openai'"},
+                status_code=422,
+            )
+        current["translation_provider"] = val
+
+    if "translation_model" in body:
+        v = body["translation_model"]
+        if v is not None and not isinstance(v, str):
+            return JSONResponse({"error": "translation_model must be a string or null"}, status_code=422)
+        current["translation_model"] = v.strip() if isinstance(v, str) else v
+
+    if "translation_fallback_provider" in body:
+        val = body["translation_fallback_provider"]
+        if val not in ("", "ollama", "openai", None):
+            return JSONResponse(
+                {"error": "translation_fallback_provider must be '', 'ollama', 'openai' or null"},
+                status_code=422,
+            )
+        current["translation_fallback_provider"] = val if val else None
 
     if "author_aliases" in body:
         aa = body["author_aliases"]
