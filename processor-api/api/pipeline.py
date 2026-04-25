@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -341,14 +342,32 @@ def _client_and_payload(
             },
         }, False
     if step_name == "subtitles":
+        from api.settings import get_setting
+
         sub_opts: dict = {"verbose": True}
         if options.get("force"):
             sub_opts["force"] = True
+
+        # Optional OpenAI post-process: cleans WhisperX artifacts (syllable
+        # duplication, broken mid-clause boundaries) preserving timestamps.
+        if "postprocess_openai" in options:
+            pp_on = bool(options["postprocess_openai"])
+        else:
+            pp_on = bool(get_setting("subtitle_postprocess_openai"))
+        if pp_on:
+            sub_opts["postprocess_openai"] = True
+            pp_model = options.get("postprocess_model") or get_setting("subtitle_postprocess_model")
+            if pp_model:
+                sub_opts["postprocess_model"] = pp_model
+            pp_key = options.get("postprocess_api_key") or get_setting("openai_api_key")
+            if pp_key:
+                sub_opts["postprocess_api_key"] = pp_key
+
         return subs_client(), {**base, "options": sub_opts}, False
     if step_name == "translate":
         from api.settings import get_setting
 
-        provider = (options.get("provider") or get_setting("translation_provider") or "openai").lower()
+        provider = (options.get("provider") or get_setting("translation_provider") or "ollama").lower()
         fallback = (
             options.get("fallback_provider")
             or get_setting("translation_fallback_provider")
@@ -363,6 +382,8 @@ def _client_and_payload(
             "source_lang": options.get("source_lang", "EN"),
             "provider": provider,
         }
+        if options.get("force"):
+            topts["force"] = True
         if model:
             topts["model"] = model
         if options.get("formality"):
@@ -383,8 +404,7 @@ def _client_and_payload(
 
         key = options.get("api_key") or (
             get_setting("openai_api_key") if provider == "openai"
-            else get_setting("deepl_api_key") if provider == "deepl"
-            else None
+            else None  # ollama no necesita key
         )
         if key:
             topts["api_key"] = key
@@ -392,8 +412,7 @@ def _client_and_payload(
         if fallback and fallback != provider:
             fb_key = options.get("fallback_api_key") or (
                 get_setting("openai_api_key") if fallback == "openai"
-                else get_setting("deepl_api_key") if fallback == "deepl"
-                else None
+                else None  # ollama no necesita key
             )
             if fb_key:
                 topts["fallback_provider"] = fallback
@@ -401,7 +420,10 @@ def _client_and_payload(
 
         return subs_client(), {**base, "options": topts}, False
     if step_name == "dubbing":
+        from api.settings import get_setting
         opts: dict = {"skip_translation": True}
+        if options.get("force"):
+            opts["force"] = True
         # Explicit voice_profile in options wins; else fall back to the one
         # stored in the instructional's sidecar. Empty = clone instructor.
         vp = options.get("voice_profile") or _load_voice_profile_for_path(path)
@@ -410,6 +432,41 @@ def _client_and_payload(
             opts["use_model_voice"] = True
         elif options.get("use_model_voice", False):
             opts["use_model_voice"] = True
+        # TTS engine selector. Soportados: 'elevenlabs' (cloud, paid) y
+        # 'piper' (local ONNX, gratis, sin cloning).
+        engine = options.get("tts_engine") or get_setting("tts_engine") or "elevenlabs"
+        opts["tts_engine"] = str(engine).strip().lower()
+        if opts["tts_engine"] == "elevenlabs":
+            voice_id = (
+                options.get("elevenlabs_voice_id")
+                or get_setting("elevenlabs_voice_id")
+                or ""
+            )
+            if voice_id:
+                opts["elevenlabs_voice_id"] = str(voice_id)
+            model_id = (
+                options.get("elevenlabs_model_id")
+                or get_setting("elevenlabs_model_id")
+                or ""
+            )
+            if model_id:
+                opts["elevenlabs_model_id"] = str(model_id)
+        elif opts["tts_engine"] == "piper":
+            piper_model = (
+                options.get("piper_model_path")
+                or get_setting("piper_model_path")
+                or ""
+            )
+            if piper_model:
+                opts["piper_model_path"] = str(piper_model)
+        elif opts["tts_engine"] == "kokoro":
+            kokoro_voice = (
+                options.get("kokoro_voice")
+                or get_setting("kokoro_voice")
+                or ""
+            )
+            if kokoro_voice:
+                opts["kokoro_voice"] = str(kokoro_voice)
         return dubbing_client(), {**base, "options": opts}, False
     raise ValueError(f"Unknown step: {step_name}")
 
@@ -882,6 +939,30 @@ async def flush_gpu():
             pass
 
     return JSONResponse({"ok": False, "message": "subtitle-generator did not recover in 60s"}, status_code=503)
+
+
+@router.post("/flush-ollama")
+async def flush_ollama() -> dict:
+    """Descarga el modelo de Ollama de VRAM al instante.
+
+    Útil entre fases del pipeline secuencial: tras translate, antes de Kokoro,
+    para liberar VRAM (~4.5 GB con qwen2.5:7b-Q4) y evitar OOM.
+    """
+    import httpx
+
+    from api.settings import get_setting
+
+    model = get_setting("translation_model") or "qwen2.5:7b-instruct-q4_K_M"
+    base = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{base}/api/chat",
+                json={"model": model, "messages": [], "keep_alive": 0, "stream": False},
+            )
+        return {"ok": r.status_code < 400, "status": r.status_code}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @router.get("/eta")

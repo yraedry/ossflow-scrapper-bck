@@ -48,7 +48,7 @@ class TranslateRequest(BaseModel):
     srt_path: str
     target_lang: str = "ES"
     source_lang: str = "EN"
-    provider: str = "openai"
+    provider: str = "ollama"
     model: str | None = None
     formality: str | None = None
     api_key: str | None = None
@@ -92,7 +92,7 @@ def _resolve_input(path: Path) -> Path:
 def _run_subtitle_generator(req: RunRequest, emit) -> None:
     """Bridge RunRequest -> subtitle_generator.pipeline.SubtitlePipeline.
 
-    When ``options.translate_only=True`` runs SRT translation (EN→ES via DeepL)
+    When ``options.translate_only=True`` runs SRT translation (EN→ES via Ollama/OpenAI)
     instead of transcription — reusing the same job/SSE contract.
     """
     opts = req.options or {}
@@ -131,6 +131,9 @@ def _run_subtitle_generator(req: RunRequest, emit) -> None:
             language=opts.get("language", "en"),
             batch_size=int(opts.get("batch_size", 4)),
             initial_prompt=initial_prompt,
+            postprocess_openai=bool(opts.get("postprocess_openai", False)),
+            postprocess_model=str(opts.get("postprocess_model", "gpt-4o-mini")),
+            postprocess_api_key=opts.get("postprocess_api_key") or os.environ.get("OPENAI_API_KEY"),
         )
         s_config = SubtitleConfig()
 
@@ -160,19 +163,15 @@ def _run_subtitle_generator(req: RunRequest, emit) -> None:
 def _build_translator_with_fallback(opts: dict):
     """Build (primary, fallback) translators from job options.
 
-    Primary provider defaults to ``openai``. Fallback is used only if the
-    primary raises at translate time. Fallback key is read from
-    ``fallback_api_key`` or, for deepl fallback, ``DEEPL_API_KEY`` env.
+    Primary provider defaults to ``ollama``. Fallback is used only if the
+    primary raises at translate time. Ollama no necesita api_key.
     """
     from subtitle_generator.translator import make_translator  # type: ignore
 
-    provider = (opts.get("provider") or "openai").lower()
+    provider = (opts.get("provider") or "ollama").lower()
     primary_key = opts.get("api_key")
-    if not primary_key:
-        if provider == "openai":
-            primary_key = os.environ.get("OPENAI_API_KEY")
-        elif provider == "deepl":
-            primary_key = os.environ.get("DEEPL_API_KEY")
+    if not primary_key and provider == "openai":
+        primary_key = os.environ.get("OPENAI_API_KEY")
 
     primary = make_translator(
         provider,
@@ -187,11 +186,8 @@ def _build_translator_with_fallback(opts: dict):
     fb = None
     if fb_name and fb_name != provider:
         fb_key = opts.get("fallback_api_key")
-        if not fb_key:
-            if fb_name == "openai":
-                fb_key = os.environ.get("OPENAI_API_KEY")
-            elif fb_name == "deepl":
-                fb_key = os.environ.get("DEEPL_API_KEY")
+        if not fb_key and fb_name == "openai":
+            fb_key = os.environ.get("OPENAI_API_KEY")
         try:
             fb = make_translator(
                 fb_name,
@@ -242,6 +238,7 @@ def _words_json_for(srt_path: Path) -> Path:
 
 def _translate_for_dubbing(
     primary, srt_path: Path, out_path: Path, cps: float,
+    force_slot_mode: bool = False,
 ) -> None:
     """Dubbing translation — industry nivel 3 (speech-anchored) with fallback.
 
@@ -252,18 +249,24 @@ def _translate_for_dubbing(
       2. Otherwise fall back to the old slot-anchored mode (nivel 2): keep
          original SRT timestamps, just adapt text to its budget.
 
-    Only supported when ``primary`` is OpenAITranslator (budget prompt-based).
+    ``force_slot_mode=True`` skips nivel 3 even when words.json exists. Use
+    this when the output must preserve the original SRT timestamps (so the
+    dub stays in sync with the on-screen video — e.g. when writing the
+    literal ``.es.srt`` track used both by subtitles and by the dubbing
+    pipeline).
+
+    Only supported when ``primary`` is a chat-based translator (Ollama or OpenAI, budget prompt-based).
     """
     from subtitle_generator.srt_io import parse_srt, serialize_srt  # type: ignore
-    from subtitle_generator.translator import OpenAITranslator  # type: ignore
+    from subtitle_generator.translator import _BaseChatTranslator  # type: ignore
 
-    if not isinstance(primary, OpenAITranslator):
+    if not isinstance(primary, _BaseChatTranslator):
         raise RuntimeError(
-            "dubbing_mode requires OpenAI provider; DeepL has no budget-aware mode"
+            "dubbing_mode requires a chat-based translator (Ollama or OpenAI)"
         )
 
     words_path = _words_json_for(srt_path)
-    if words_path.exists():
+    if words_path.exists() and not force_slot_mode:
         _translate_for_dubbing_nivel3(primary, words_path, out_path, cps)
         return
 
@@ -360,18 +363,24 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
     else:
         raise FileNotFoundError(f"input_path not found: {root}")
 
+    # Exclude output subfolders (doblajes/, elevenlabs/) — their .srt files
+    # come from already-processed videos and re-translating them creates
+    # spurious .es.srt next to dubs.
+    _EXCLUDED_DIR_NAMES = {"doblajes", "elevenlabs"}
     srts = [
         s for s in srts
         if not s.name.endswith(".es.srt")
         and not s.name.endswith(".dub.es.srt")
         and not s.stem.endswith("_ES")
         and not s.stem.endswith("_ESP_DUB")
+        and not any(part.lower() in _EXCLUDED_DIR_NAMES for part in s.parts)
     ]
 
     with emit_logs(emit, level=level):
         primary, fallback = _build_translator_with_fallback(opts)
-        provider_name = (opts.get("provider") or "openai").lower()
+        provider_name = (opts.get("provider") or "ollama").lower()
         fb_name = (opts.get("fallback_provider") or "").lower() or None
+        force = bool(opts.get("force"))
 
         total = len(srts)
         emit(JobEvent(type="log", data={"message":
@@ -386,18 +395,61 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
         cps = float(opts.get("dubbing_cps", 16.0))
         if dubbing_mode:
             emit(JobEvent(type="log", data={"message":
-                f"dubbing_mode ON (cps={cps}): translations will respect per-slot char budgets"
+                f"dubbing_mode ON (cps={cps}): .es.srt will be compacted to fit "
+                f"per-slot char budgets while keeping original SRT timestamps"
             }))
 
         for i, srt in enumerate(srts, 1):
-            # Both outputs use the video-level stem (no ".en" suffix) so
-            # foo.en.srt -> foo.es.srt and foo.dub.es.srt consistently.
+            # Single target — the literal .es.srt. In dubbing_mode the text is
+            # compacted to each SRT slot's char budget (still anchored to the
+            # original timestamps so the dub stays in sync with the on-screen
+            # video). No .dub.es.srt sidecar is written.
             sub_out = _literal_srt_path_for(srt)
-            dub_out = _dub_srt_path_for(srt)
 
-            # 1. Literal subtitle translation (skip if already present).
+            if sub_out.exists() and force:
+                try:
+                    sub_out.unlink()
+                    emit(JobEvent(type="log", data={"message":
+                        f"force overwrite: removed existing {sub_out.name}"
+                    }))
+                except OSError as exc:
+                    emit(JobEvent(type="log", data={"message":
+                        f"ERROR removing {sub_out.name}: {exc}"
+                    }))
             if sub_out.exists():
                 emit(JobEvent(type="log", data={"message": f"skip subs (exists): {sub_out.name}"}))
+            elif dubbing_mode:
+                try:
+                    # force_slot_mode=False → use speech-anchored level 3 when
+                    # a .words.json exists (real pause-based segmentation for
+                    # fluent dub without mid-speech silence). Falls back to
+                    # level 2 (SRT slots) automatically when no words index is
+                    # present. Tolerance for visual drift: ~1-2 s per segment.
+                    _translate_for_dubbing(primary, srt, sub_out, cps, force_slot_mode=False)
+                    emit(JobEvent(type="log", data={"message":
+                        f"translated subs (dub-compact): {srt.name} -> {sub_out.name}"
+                    }))
+                except Exception as exc:
+                    emit(JobEvent(type="log", data={"message":
+                        f"{provider_name} dub-compact failed on {srt.name}: {exc}"
+                    }))
+                    if fallback is not None:
+                        from subtitle_generator.translator import _BaseChatTranslator  # type: ignore
+                        try:
+                            if isinstance(fallback, _BaseChatTranslator):
+                                _translate_for_dubbing(fallback, srt, sub_out, cps, force_slot_mode=False)
+                                emit(JobEvent(type="log", data={"message":
+                                    f"translated subs via fallback {fb_name} (dub-aware): {srt.name}"
+                                }))
+                            else:
+                                fallback.translate_srt(srt, sub_out)
+                                emit(JobEvent(type="log", data={"message":
+                                    f"translated subs via fallback {fb_name} (literal): {srt.name}"
+                                }))
+                        except Exception as exc2:
+                            emit(JobEvent(type="log", data={"message":
+                                f"ERROR fallback {fb_name} also failed on {srt.name}: {exc2}"
+                            }))
             else:
                 try:
                     primary.translate_srt(srt, sub_out)
@@ -416,20 +468,6 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
                             emit(JobEvent(type="log", data={"message":
                                 f"ERROR fallback {fb_name} also failed on {srt.name}: {exc2}"
                             }))
-
-            # 2. Dubbing-adapted version (only when enabled). Always derived
-            #    from the source EN srt (not from sub_out) so we don't compound
-            #    translation drift. Regenerates if missing.
-            if dubbing_mode and not dub_out.exists():
-                try:
-                    _translate_for_dubbing(primary, srt, dub_out, cps)
-                    emit(JobEvent(type="log", data={"message": f"translated dub: {srt.name} -> {dub_out.name}"}))
-                except Exception as exc:
-                    emit(JobEvent(type="log", data={"message":
-                        f"{provider_name} dubbing-mode failed on {srt.name}: {exc}"
-                    }))
-            elif dubbing_mode:
-                emit(JobEvent(type="log", data={"message": f"skip dub (exists): {dub_out.name}"}))
 
             pct = int(i * 100 / total)
             emit(JobEvent(type="progress", data={"pct": pct}))
@@ -620,11 +658,14 @@ def translate(req: TranslateRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc))
 
     if req.dubbing_mode:
-        # Iso-sync adaptation → writes a separate .dub.es.srt sidecar by
-        # default, leaving the literal subtitle track untouched.
-        out = _P(req.out_path) if req.out_path else _dub_srt_path_for(srt)
+        # Budget-aware adaptation written to the literal .es.srt so subs and
+        # dubbing share a single source of truth. Level 3 (speech-anchored)
+        # when a .words.json exists, level 2 (SRT slots) otherwise. The level 3
+        # timestamps re-align to real speech pauses, so the dub reads fluently
+        # while staying within ~1-2 s of the original video cues.
+        out = _P(req.out_path) if req.out_path else _literal_srt_path_for(srt)
         try:
-            _translate_for_dubbing(primary, srt, out, req.dubbing_cps)
+            _translate_for_dubbing(primary, srt, out, req.dubbing_cps, force_slot_mode=False)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"{req.provider} (dubbing): {exc}")
         return {
@@ -750,17 +791,26 @@ def analyze_video(req: AnalyzeRequest) -> dict:
         },
     )
 
+    # `s.get("start")` puede ser ``None`` en algunas ramas de WhisperX (segmentos
+    # sin alineamiento); coerción a float previene ``TypeError: argument of type
+    # 'NoneType' is not iterable`` en el round/sort posteriores.
+    def _sec(v):
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
     # 4a. Transcribe original audio
     result_raw = model.transcribe(audio, batch_size=t_config.batch_size, language=req.language)
     raw_segments = [
-        {"start": round(s.get("start", 0), 3), "end": round(s.get("end", 0), 3), "text": s.get("text", "")}
+        {"start": round(_sec(s.get("start")), 3), "end": round(_sec(s.get("end")), 3), "text": s.get("text", "")}
         for s in result_raw.get("segments", [])
     ]
 
     # 4b. Transcribe denoised audio
     result_dn = model.transcribe(denoised, batch_size=t_config.batch_size, language=req.language)
     dn_segments = [
-        {"start": round(s.get("start", 0), 3), "end": round(s.get("end", 0), 3), "text": s.get("text", "")}
+        {"start": round(_sec(s.get("start")), 3), "end": round(_sec(s.get("end")), 3), "text": s.get("text", "")}
         for s in result_dn.get("segments", [])
     ]
 

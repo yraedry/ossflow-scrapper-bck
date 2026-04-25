@@ -30,6 +30,7 @@ import {
   Route,
   AlertTriangle,
   RefreshCw,
+  Mic2,
 } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -49,6 +50,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useTheme } from '@/components/theme-provider'
+import { useBackendsHealth } from '@/components/layout/useBackendsHealth'
 import { useSettings, useUpdateSettings } from '@/features/settings/api/useSettings'
 import { useMount, useMountStatus } from '@/features/settings/api/useMount'
 import { useProviders } from '@/features/oracle/api/useOracle'
@@ -98,6 +100,14 @@ const processingSchema = z.object({
   target_lang: z.string().min(2).max(8).default('es'),
 })
 
+const ttsSchema = z.object({
+  tts_engine: z.enum(['elevenlabs', 'piper', 'kokoro']).default('elevenlabs'),
+  elevenlabs_voice_id: z.string().optional().nullable(),
+  elevenlabs_model_id: z.string().optional().nullable(),
+  piper_model_path: z.string().optional().nullable(),
+  kokoro_voice: z.enum(['em_alex', 'em_santa']).optional().nullable(),
+})
+
 const oracleSchema = z.object({
   provider_default: z.string().optional(),
   timeout_seconds: z.coerce.number().int().min(5).max(300).default(30),
@@ -116,16 +126,16 @@ const telegramSchema = z.object({
 })
 
 const translationSchema = z.object({
-  translation_provider: z.enum(['openai', 'deepl']).default('openai'),
+  translation_provider: z.enum(['ollama', 'openai']).default('ollama'),
   translation_model: z.string().optional(),
-  translation_fallback_provider: z.enum(['', 'openai', 'deepl']).optional(),
+  translation_fallback_provider: z.enum(['', 'ollama', 'openai']).optional(),
   openai_api_key: z.string().optional(),
-  deepl_api_key: z.string().optional(),
 })
 
 const SECTIONS = [
   { id: 'library', label: 'Biblioteca', icon: FolderOpen },
   { id: 'processing', label: 'Procesamiento', icon: Cog },
+  { id: 'tts', label: 'TTS / Doblaje', icon: Mic2 },
   { id: 'oracle', label: 'Oracle', icon: Sparkles },
   { id: 'telegram', label: 'Telegram', icon: Send },
   { id: 'translation', label: 'Traducción', icon: Plug },
@@ -189,6 +199,7 @@ export default function SettingsPage() {
             <>
               {active === 'library' && <LibrarySection settings={settings} />}
               {active === 'processing' && <ProcessingSection settings={settings} />}
+              {active === 'tts' && <TtsSection settings={settings} />}
               {active === 'oracle' && <OracleSection settings={settings} />}
               {active === 'telegram' && <TelegramSection settings={settings} />}
               {active === 'translation' && <TranslationSection settings={settings} />}
@@ -587,6 +598,146 @@ function ProcessingSection({ settings }) {
   )
 }
 
+function TtsSection({ settings }) {
+  const updateMut = useUpdateSettings()
+  const form = useForm({
+    resolver: zodResolver(ttsSchema),
+    defaultValues: {
+      tts_engine: settings?.tts_engine || 'elevenlabs',
+      elevenlabs_voice_id: settings?.elevenlabs_voice_id || '',
+      elevenlabs_model_id: settings?.elevenlabs_model_id || 'eleven_multilingual_v2',
+      piper_model_path: settings?.piper_model_path || '/models/piper/es_ES-sharvard-medium.onnx',
+      kokoro_voice: settings?.kokoro_voice || 'em_alex',
+    },
+  })
+
+  const engine = form.watch('tts_engine')
+  const kokoroVoice = form.watch('kokoro_voice')
+
+  const onSubmit = async (values) => {
+    try {
+      const payload = {
+        tts_engine: values.tts_engine,
+        elevenlabs_voice_id: values.elevenlabs_voice_id || null,
+        elevenlabs_model_id: values.elevenlabs_model_id || null,
+        piper_model_path: values.piper_model_path || null,
+        kokoro_voice: values.kokoro_voice || null,
+      }
+      await updateMut.mutateAsync(payload)
+      toast.success('TTS guardado')
+      form.reset(values)
+    } catch (e) {
+      toast.error(e?.message || 'Error al guardar')
+    }
+  }
+
+  const { isDirty } = form.formState
+
+  return (
+    <form onSubmit={form.handleSubmit(onSubmit)}>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Mic2 size={16} className="text-primary" />
+            TTS / Doblaje
+            {isDirty && <Badge variant="outline" className="ml-2 border-amber-500/40 text-amber-500">sin guardar</Badge>}
+          </CardTitle>
+          <CardDescription>
+            Motor de síntesis para el doblaje. ElevenLabs (cloud, voice cloning, de pago) o Piper (local, voz preset ES, gratis).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <Label htmlFor="tts_engine">Motor TTS</Label>
+            <Select
+              value={engine}
+              onValueChange={(v) => form.setValue('tts_engine', v, { shouldDirty: true })}
+            >
+              <SelectTrigger id="tts_engine" className="mt-1.5">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="elevenlabs">ElevenLabs (cloud, clonación de voz, de pago)</SelectItem>
+                <SelectItem value="piper">Piper (local, voz preset ES, gratis, rápido)</SelectItem>
+                <SelectItem value="kokoro">Kokoro-82M (local, voz preset ES, GPU, mejor prosodia)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {engine === 'elevenlabs' && (
+            <>
+              <div>
+                <Label htmlFor="elevenlabs_voice_id">Voice ID</Label>
+                <Input
+                  id="elevenlabs_voice_id"
+                  placeholder="ej: LlZr3QuzbW4WrPjgATHG"
+                  {...form.register('elevenlabs_voice_id')}
+                  className="mt-1.5 font-mono"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Voice ID pre-registrado en el dashboard de ElevenLabs (PVC o IVC).
+                </p>
+              </div>
+              <div>
+                <Label htmlFor="elevenlabs_model_id">Modelo</Label>
+                <Input
+                  id="elevenlabs_model_id"
+                  placeholder="eleven_multilingual_v2"
+                  {...form.register('elevenlabs_model_id')}
+                  className="mt-1.5 font-mono"
+                />
+              </div>
+            </>
+          )}
+
+          {engine === 'piper' && (
+            <div>
+              <Label htmlFor="piper_model_path">Path del modelo Piper</Label>
+              <Input
+                id="piper_model_path"
+                placeholder="/models/piper/es_ES-sharvard-medium.onnx"
+                {...form.register('piper_model_path')}
+                className="mt-1.5 font-mono"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Path absoluto al .onnx dentro del contenedor dubbing-generator. La imagen incluye <code>es_ES-sharvard-medium</code> por defecto.
+              </p>
+            </div>
+          )}
+
+          {engine === 'kokoro' && (
+            <div>
+              <Label htmlFor="kokoro_voice">Voz Kokoro</Label>
+              <Select
+                value={kokoroVoice}
+                onValueChange={(v) => form.setValue('kokoro_voice', v, { shouldDirty: true })}
+              >
+                <SelectTrigger id="kokoro_voice" className="mt-1.5">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="em_alex">em_alex (masculino ES)</SelectItem>
+                  <SelectItem value="em_santa">em_santa (masculino ES alternativo)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground mt-1">
+                Kokoro-82M usa GPU para inferencia rápida. Modelo descargado en build.
+              </p>
+            </div>
+          )}
+        </CardContent>
+        <Separator />
+        <div className="flex justify-end gap-2 p-4">
+          <Button type="submit" disabled={!isDirty || updateMut.isPending}>
+            {updateMut.isPending ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+            Guardar
+          </Button>
+        </div>
+      </Card>
+    </form>
+  )
+}
+
 function OracleSection({ settings }) {
   const updateMut = useUpdateSettings()
   const { data: providers = [] } = useProviders()
@@ -808,23 +959,33 @@ function TelegramSection({ settings }) {
   )
 }
 
+const OLLAMA_MODELS = ['qwen2.5:7b-instruct-q4_K_M', 'qwen2.5:14b-instruct-q4_K_M']
+const OPENAI_MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1']
+
 function TranslationSection({ settings }) {
   const updateMut = useUpdateSettings()
   const [showOpenAI, setShowOpenAI] = useState(false)
-  const [showDeepL, setShowDeepL] = useState(false)
 
   const form = useForm({
     resolver: zodResolver(translationSchema),
     defaultValues: {
-      translation_provider: settings?.translation_provider || 'openai',
-      translation_model: settings?.translation_model || 'gpt-4o-mini',
-      translation_fallback_provider: settings?.translation_fallback_provider || '',
+      translation_provider: settings?.translation_provider || 'ollama',
+      translation_model: settings?.translation_model || 'qwen2.5:7b-instruct-q4_K_M',
+      translation_fallback_provider: settings?.translation_fallback_provider || 'openai',
       openai_api_key: settings?.openai_api_key || '',
-      deepl_api_key: settings?.deepl_api_key || '',
     },
   })
 
   const provider = form.watch('translation_provider')
+
+  useEffect(() => {
+    const current = form.getValues('translation_model')
+    if (provider === 'ollama' && !OLLAMA_MODELS.includes(current)) {
+      form.setValue('translation_model', 'qwen2.5:7b-instruct-q4_K_M', { shouldDirty: true })
+    } else if (provider === 'openai' && !OPENAI_MODELS.includes(current)) {
+      form.setValue('translation_model', 'gpt-4o-mini', { shouldDirty: true })
+    }
+  }, [provider, form])
 
   const onSubmit = async (values) => {
     try {
@@ -837,7 +998,6 @@ function TranslationSection({ settings }) {
         translation_model: raw(values.translation_model),
         translation_fallback_provider: values.translation_fallback_provider || null,
         openai_api_key: raw(values.openai_api_key),
-        deepl_api_key: raw(values.deepl_api_key),
       })
       toast.success('Traducción guardada')
       form.reset(values)
@@ -848,11 +1008,22 @@ function TranslationSection({ settings }) {
 
   const { isDirty } = form.formState
   const hasOpenAI = !!(settings?.openai_api_key)
-  const hasDeepL = !!(settings?.deepl_api_key)
-  const deeplIsFree = (settings?.deepl_api_key || '').endsWith(':fx')
+
+  const backends = useBackendsHealth()
+  const ollamaStatus = backends.find((b) => b.id === 'ollama')?.status
+  const showOllamaWarning = provider === 'ollama' && ollamaStatus === 'down'
 
   return (
     <form onSubmit={form.handleSubmit(onSubmit)}>
+      {showOllamaWarning && (
+        <div className="mb-4 rounded-md border border-yellow-500/50 bg-yellow-500/10 p-3 text-sm">
+          <p className="font-medium">Ollama no está respondiendo</p>
+          <p className="mt-1 text-muted-foreground">
+            El modelo se está descargando (~4.5 GB la primera vez) o el servicio no arrancó.
+            Mientras tanto puedes cambiar a OpenAI en el selector.
+          </p>
+        </div>
+      )}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -865,7 +1036,7 @@ function TranslationSection({ settings }) {
             )}
           </CardTitle>
           <CardDescription>
-            Motor de traducción de subtítulos EN → ES. OpenAI (gpt-4o-mini) por defecto, DeepL como fallback.
+            Ollama local (qwen2.5-7b) por defecto, OpenAI como fallback opt-in.
             Términos BJJ (guard, mount, armbar…) se mantienen en inglés.
           </CardDescription>
         </CardHeader>
@@ -879,8 +1050,8 @@ function TranslationSection({ settings }) {
               >
                 <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="openai">OpenAI (gpt-4o-mini)</SelectItem>
-                  <SelectItem value="deepl">DeepL</SelectItem>
+                  <SelectItem value="ollama">Ollama (local, gratis)</SelectItem>
+                  <SelectItem value="openai">OpenAI (cloud, pago)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -894,17 +1065,30 @@ function TranslationSection({ settings }) {
               >
                 <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__none__">Sin fallback</SelectItem>
-                  <SelectItem value="openai">OpenAI</SelectItem>
-                  <SelectItem value="deepl">DeepL</SelectItem>
+                  <SelectItem value="__none__">Ninguno</SelectItem>
+                  <SelectItem value="ollama">Ollama (local)</SelectItem>
+                  <SelectItem value="openai">OpenAI (cloud)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
 
-          {provider === 'openai' && (
-            <div>
-              <Label htmlFor="translation_model">Modelo OpenAI</Label>
+          <div>
+            <Label htmlFor="translation_model">Modelo</Label>
+            {provider === 'ollama' ? (
+              <Select
+                value={form.watch('translation_model') || 'qwen2.5:7b-instruct-q4_K_M'}
+                onValueChange={(v) => form.setValue('translation_model', v, { shouldDirty: true })}
+              >
+                <SelectTrigger id="translation_model" className="mt-1.5 font-mono">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="qwen2.5:7b-instruct-q4_K_M">qwen2.5:7b-instruct-q4_K_M (default, ~4.5 GB VRAM)</SelectItem>
+                  <SelectItem value="qwen2.5:14b-instruct-q4_K_M">qwen2.5:14b-instruct-q4_K_M (~9 GB VRAM, mejor calidad)</SelectItem>
+                </SelectContent>
+              </Select>
+            ) : (
               <Select
                 value={form.watch('translation_model') || 'gpt-4o-mini'}
                 onValueChange={(v) => form.setValue('translation_model', v, { shouldDirty: true })}
@@ -913,17 +1097,14 @@ function TranslationSection({ settings }) {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="gpt-4o-mini">gpt-4o-mini (económico)</SelectItem>
-                  <SelectItem value="gpt-4o">gpt-4o (mejor calidad, ~10× más caro)</SelectItem>
+                  <SelectItem value="gpt-4o-mini">gpt-4o-mini</SelectItem>
+                  <SelectItem value="gpt-4o">gpt-4o</SelectItem>
                   <SelectItem value="gpt-4.1-mini">gpt-4.1-mini</SelectItem>
                   <SelectItem value="gpt-4.1">gpt-4.1</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground mt-1">
-                <code>gpt-4o-mini</code> recomendado (~$0.03/Season). <code>gpt-4o</code> mejor para dubbing fill_budget si ves count mismatch.
-              </p>
-            </div>
-          )}
+            )}
+          </div>
 
           <div>
             <Label htmlFor="openai_api_key" className="flex items-center gap-2">
@@ -959,40 +1140,6 @@ function TranslationSection({ settings }) {
             </p>
           </div>
 
-          <div>
-            <Label htmlFor="deepl_api_key" className="flex items-center gap-2">
-              DeepL API Key
-              {hasDeepL && (
-                <Badge variant="outline" className="border-emerald-500/40 text-emerald-500">
-                  {deeplIsFree ? 'Free' : 'Pro'}
-                </Badge>
-              )}
-            </Label>
-            <div className="relative mt-1.5">
-              <Input
-                id="deepl_api_key"
-                type={showDeepL ? 'text' : 'password'}
-                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx"
-                autoComplete="off"
-                {...form.register('deepl_api_key')}
-                className="font-mono pr-10"
-              />
-              <button
-                type="button"
-                onClick={() => setShowDeepL((v) => !v)}
-                aria-label={showDeepL ? 'Ocultar key' : 'Mostrar key'}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              >
-                {showDeepL ? <EyeOff size={14} /> : <Eye size={14} />}
-              </button>
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">
-              <a href="https://www.deepl.com/pro-api" target="_blank" rel="noopener noreferrer" className="underline hover:text-primary">
-                deepl.com/pro-api
-              </a>
-              . Free: 500k caracteres/mes.
-            </p>
-          </div>
         </CardContent>
         <Separator />
         <div className="flex justify-end gap-2 p-4">

@@ -1,4 +1,4 @@
-"""SRT translation with pluggable providers (OpenAI, DeepL).
+"""SRT translation with pluggable providers (Ollama local, OpenAI cloud).
 
 Preserves timestamps and subtitle structure. Writes ``{base}_ES.srt`` next
 to the source file.
@@ -6,12 +6,15 @@ to the source file.
 
 from __future__ import annotations
 
+import abc
 import json
 import logging
 import os
+import random
 import re
+import time
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Any, Iterable, Protocol
 
 import httpx
 
@@ -19,11 +22,64 @@ from .srt_io import parse_srt, serialize_srt
 
 log = logging.getLogger("subtitler")
 
-DEEPL_FREE_URL = "https://api-free.deepl.com/v2/translate"
-DEEPL_PRO_URL = "https://api.deepl.com/v2/translate"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 _TIMEOUT = 120.0
+
+_RATE_LIMIT_MAX_RETRIES = 5
+_RATE_LIMIT_MAX_WAIT = 60.0
+_TRY_AGAIN_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+
+
+def _retry_delay_from_response(resp: httpx.Response, attempt: int) -> float:
+    """Pick a wait time for 429/5xx based on headers, body, or exponential backoff."""
+    header = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+    if header:
+        try:
+            return min(float(header), _RATE_LIMIT_MAX_WAIT)
+        except ValueError:
+            pass
+    match = _TRY_AGAIN_RE.search(resp.text or "")
+    if match:
+        try:
+            return min(float(match.group(1)) + 0.5, _RATE_LIMIT_MAX_WAIT)
+        except ValueError:
+            pass
+    # Exponential backoff with jitter: 1, 2, 4, 8, 16 s (capped).
+    base = min(2 ** attempt, _RATE_LIMIT_MAX_WAIT)
+    return base + random.uniform(0, 0.5)
+
+
+def _post_with_retry(
+    url: str,
+    *,
+    headers: dict,
+    json_body: dict | None = None,
+    data: dict | None = None,
+    provider_label: str,
+) -> httpx.Response:
+    """POST that retries 429 and 5xx with backoff. Other errors bubble up via caller."""
+    last_resp: httpx.Response | None = None
+    for attempt in range(_RATE_LIMIT_MAX_RETRIES):
+        with httpx.Client(timeout=_TIMEOUT) as client:
+            resp = client.post(url, headers=headers, json=json_body, data=data)
+        if resp.status_code < 400:
+            return resp
+        if resp.status_code == 429 or 500 <= resp.status_code < 600:
+            last_resp = resp
+            if attempt == _RATE_LIMIT_MAX_RETRIES - 1:
+                break
+            wait = _retry_delay_from_response(resp, attempt)
+            log.warning(
+                "%s %d (attempt %d/%d) — sleeping %.1fs before retry",
+                provider_label, resp.status_code, attempt + 1,
+                _RATE_LIMIT_MAX_RETRIES, wait,
+            )
+            time.sleep(wait)
+            continue
+        return resp
+    assert last_resp is not None  # loop above always enters at least once
+    return last_resp
 
 
 # ---------------------------------------------------------------------------
@@ -100,75 +156,43 @@ class _BaseTranslator:
 
 
 # ---------------------------------------------------------------------------
-# DeepL provider
-# ---------------------------------------------------------------------------
-
-class DeepLTranslator(_BaseTranslator):
-    """Translate SRT files using the DeepL REST API."""
-
-    _BATCH_SIZE = 40
-
-    def __init__(
-        self,
-        api_key: str | None = None,
-        source_lang: str = "EN",
-        target_lang: str = "ES",
-        formality: str | None = None,
-        pro: bool | None = None,
-    ) -> None:
-        super().__init__(source_lang, target_lang)
-        key = api_key or os.environ.get("DEEPL_API_KEY")
-        if not key:
-            raise ValueError("DEEPL_API_KEY not provided (env or constructor)")
-        self.api_key = key
-        self.formality = formality
-        if pro is None:
-            pro = not key.endswith(":fx")
-        self.url = DEEPL_PRO_URL if pro else DEEPL_FREE_URL
-
-    def translate_texts(self, texts: list[str]) -> list[str]:
-        if not texts:
-            return []
-        out: list[str] = []
-        for chunk in _chunks(texts, self._BATCH_SIZE):
-            out.extend(self._post(chunk))
-        return out
-
-    def _post(self, texts: list[str]) -> list[str]:
-        payload: dict[str, str | list[str]] = {
-            "source_lang": self.source_lang,
-            "target_lang": self.target_lang,
-            "preserve_formatting": "1",
-            "split_sentences": "0",
-            "text": texts,
-        }
-        if self.formality:
-            payload["formality"] = self.formality
-
-        headers = {
-            "Authorization": f"DeepL-Auth-Key {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        with httpx.Client(timeout=_TIMEOUT) as client:
-            r = client.post(self.url, headers=headers, json=payload)
-        if r.status_code >= 400:
-            raise RuntimeError(f"DeepL error {r.status_code}: {r.text[:300]}")
-        return [t["text"] for t in r.json().get("translations", [])]
-
-
-# ---------------------------------------------------------------------------
 # OpenAI provider (BJJ-aware, keeps technique names in English)
 # ---------------------------------------------------------------------------
 
 _BJJ_SYSTEM_PROMPT = """You translate Brazilian Jiu-Jitsu instructional subtitles from {src_name} to {tgt_name}.
 
+TERMINOLOGY — CRITICAL, DO NOT CONFUSE THESE WORDS:
+- "grip" = the HAND grabbing fabric/wrist. Keep as "grip" in Spanish, never translate to "agarre", "gancho", "enganche".
+- "hook" = a LEG hooking (butterfly hook, inside hook, heel hook). Keep as "hook" in Spanish, never translate to "gancho" (except when the English itself literally says "hook" as a noun for a submission like "heel hook" — still keep in English).
+- "underhook" / "overhook" = arm positions. Keep in English, never "sub-gancho" or similar invention.
+- "frame" = rigid bone structure against the opponent. Keep as "frame".
+- "post" = supporting limb on the ground. Keep as "post" (verb: "hacer post", "postear").
+- "base" = body stability / supporting leg. Keep as "base".
+- "pressure" = weight / pressure applied. Can be "presión" OR kept as "pressure"; prefer "presión" in narration, keep "pressure" if it's a noun referring to a technique ("pressure pass" -> "pressure pass").
+
 Rules, non-negotiable:
-1. Keep BJJ technique names and positions in English (examples: guard, half-guard, mount, side control, armbar, kimura, triangle, heel hook, sweep, pass, tripod pass, underhook, overhook, kimura grip, gable grip, knee cut, smash pass, leg drag, berimbolo, de la riva, x-guard, butterfly guard, closed guard, open guard, etc.). Do not translate them.
-2. Keep common grappling English terms and actions as-is too (grip, frame, framing, post, base, hook, lapel, sleeve, collar, gi, no-gi, tap, pin, pinning, pummel, pummeling, sprawl, turtle, turtling, scramble, roll, rolling, drill, drilling, crossface, whizzer, backstep, reset, setup, entry, transition, top, bottom, pressure, stack, stacking).
-3. Translate ordinary narration, explanations, transitions and body descriptions naturally into neutral, informal {tgt_name} as spoken by a coach.
+1. Keep BJJ technique names and positions in English: guard, half-guard, closed guard, open guard, butterfly guard, de la Riva, reverse de la Riva, x-guard, spider guard, lasso guard, rubber guard, worm guard, knee shield, mount, side control, back mount, north-south, turtle, kimura, armbar, triangle, omoplata, heel hook, toe hold, kneebar, ankle lock, rear naked choke, guillotine, darce, anaconda, ezekiel, bow and arrow, cross collar choke, arm triangle, gogoplata, americana, kimura grip, gable grip, s-grip, pistol grip, berimbolo, knee cut, knee slice, leg drag, smash pass, tripod pass, toreando, stack pass, body lock pass, over-under pass, long step, backstep, sweep, bridge, shrimp, hip escape, technical stand-up, sprawl, scramble. Portuguese and Japanese technique names also stay as-is (juji gatame, sankaku, kesa gatame, mata leão, ashi garami, imanari roll, etc.).
+2. Keep grappling English terms untranslated: grip, frame, framing, post, base, hook, lapel, sleeve, collar, gi, no-gi, tap, pin, pummel, pummeling, crossface, whizzer, reset, setup, entry, transition, top, bottom, stack, drill, roll, sparring.
+3. Translate ordinary narration, explanations, transitions and body descriptions into informal {tgt_name} de España (castellano peninsular) as spoken by a coach. Use "tú" (nunca "vos" ni "usted"), vocabulario y giros de España ("vale", "coger", "ahora", "vamos a ver", "fíjate"), NUNCA latinoamericanismos ("agarrar" por "coger", "ustedes", "ahorita", "chévere", "pararse" por "ponerse de pie"). Conjugación 2ª persona singular en presente/imperativo siempre peninsular ("coges", "coge", "fíjate", "mira"). Evita el voseo y el "ustedeo".
 4. Preserve meaning; do NOT add, shorten or merge content. One input item = one output item, same order.
 5. Preserve line breaks inside a subtitle block exactly.
 6. Output MUST be a JSON object of the exact shape: {{"t": ["translated item 1", "translated item 2", ...]}} with the same number of items as the input, in the same order.
+
+EXAMPLES (illustrative, follow this style):
+EN: "Establish your grips on the sleeve and collar before you open the guard."
+ES: "Establece tus grips en la manga y el collar antes de abrir la guard."
+
+EN: "I'm going to hook under his leg with my butterfly hook and sweep."
+ES: "Voy a meter el hook bajo su pierna con el butterfly hook y barrer con un sweep."
+
+EN: "Get your underhook, pummel through, and establish frames on the hips."
+ES: "Consigue el underhook, haz pummel por dentro y coloca frames en las caderas."
+
+EN: "From half guard, you threaten the kimura to force the pass."
+ES: "Desde half guard, amenazas con la kimura para forzar el pass."
+
+EN: "Control the ankle, then break the grip on your collar."
+ES: "Controla el tobillo, luego rompe el grip en tu collar."
 """
 
 
@@ -178,16 +202,32 @@ Rules, non-negotiable:
 # This avoids the classic "ES is 40% longer than EN → robotic acceleration".
 _BJJ_DUBBING_SYSTEM_PROMPT = """You adapt Brazilian Jiu-Jitsu instructional subtitles from {src_name} to {tgt_name} FOR DUBBING (voice-over).
 
+TERMINOLOGY — CRITICAL, DO NOT CONFUSE THESE WORDS:
+- "grip" = the HAND grabbing. Keep as "grip". NEVER translate to "agarre", "gancho", "enganche".
+- "hook" = a LEG hooking. Keep as "hook". NEVER translate to "gancho".
+- "underhook" / "overhook" = arm positions. Keep in English.
+- "frame" / "post" / "base" = keep in English.
+
 Priorities in order (industry dubbing standard):
 1. PRESERVE CONTENT — every technical concept, BJJ term, instruction and explanation must survive. Losing a technique name or a step is a critical failure. If budget is tight, it is better to slightly overflow than to drop content.
 2. TARGET BUDGET — each item has a "max_chars" budget (~{cps} chars/second of {tgt_name} speech). Aim for it. Soft overflow up to ~20% is acceptable when needed to keep the full meaning; audio stretch will absorb it.
 3. NATURAL PHRASING — drop pure filler ("you know", "alright", "so", "basically"), compact verbose connectors ("vamos a hacer" → "hacemos", "es importante que" → "es clave"), but never sacrifice technical information for brevity.
 
 Rules, non-negotiable:
-1. Keep BJJ technique names and grappling English terms in English (guard, half-guard, armbar, kimura, triangle, heel hook, sweep, pass, underhook, overhook, grip, frame, base, hook, lapel, sleeve, mount, side control, knee cut, smash pass, leg drag, berimbolo, de la riva, x-guard, butterfly guard, closed guard, open guard, crossface, whizzer, tap, pummel, sprawl, scramble, drill, setup, entry, transition, top, bottom, pressure).
-2. Use neutral informal {tgt_name} as spoken by a coach. Second person singular ("tú"/"you"-style) unless the original uses plural.
+1. Keep BJJ technique names and grappling English terms in English (guard, half-guard, closed guard, open guard, butterfly guard, de la Riva, x-guard, spider guard, lasso guard, rubber guard, worm guard, knee shield, mount, side control, back mount, north-south, turtle, armbar, kimura, triangle, omoplata, heel hook, toe hold, kneebar, ankle lock, rear naked choke, guillotine, darce, anaconda, ezekiel, bow and arrow, americana, berimbolo, knee cut, knee slice, leg drag, smash pass, tripod pass, toreando, stack pass, body lock pass, sweep, bridge, shrimp, hip escape, technical stand-up, underhook, overhook, grip, frame, framing, post, base, hook, lapel, sleeve, collar, gi, no-gi, crossface, whizzer, pummel, sprawl, scramble, drill, setup, entry, transition, top, bottom, stack). Portuguese/Japanese names too (juji gatame, sankaku, ashi garami, mata leão, kesa gatame).
+2. Use informal {tgt_name} de España (castellano peninsular) as spoken by a coach. Second person singular "tú" (nunca "vos"/"usted"), vocabulario y giros de España ("coger", "vale", "fíjate", "ahora", "mira"), evita latinoamericanismos ("agarrar", "ahorita", "ustedes" por "vosotros", "pararse" por "ponerse de pie"). Imperativo peninsular ("coge", "mira", "fíjate").
 3. One input item = one output item, same order. Never merge, split, or drop items. If an item is short, keep the translation short too — do not pad to fill the budget.
 4. Output MUST be a JSON object: {{"t": ["adapted item 1", ...]}} with the same number of items as the input, in the same order.
+
+EXAMPLES:
+EN: "Get your grip on the sleeve first."
+ES: "Coge el grip en la manga primero."
+
+EN: "Use the butterfly hook to sweep him."
+ES: "Usa el butterfly hook para barrerlo."
+
+EN: "Underhook deep, then frame on his hip."
+ES: "Underhook profundo, luego frame en su cadera."
 """
 
 
@@ -218,29 +258,48 @@ Priorities in order:
    "básicamente", "como ves", "observa cómo", "de esta forma") to
    reach the target range. Do NOT pad aggressively or duplicate ideas.
 3. NATURAL PHRASING — coach register, second person singular ("tú"),
-   informal neutral {tgt_name}. Avoid filler that sounds robotic; prefer
-   genuine discourse markers that a real dub actor would say.
+   informal {tgt_name} de España (castellano peninsular). Vocabulario y
+   giros de España ("vale", "coger", "fíjate", "mira", "ahora"), evita
+   latinoamericanismos ("agarrar", "ustedes" por "vosotros", "ahorita").
+   Avoid filler that sounds robotic; prefer genuine discourse markers that
+   a real Spanish dub actor would say.
+
+TERMINOLOGY — CRITICAL, DO NOT CONFUSE:
+- "grip" = HAND grab → keep as "grip", NEVER "agarre"/"gancho".
+- "hook" = LEG hook → keep as "hook", NEVER "gancho".
+- "underhook"/"overhook"/"frame"/"post"/"base" → keep in English.
 
 Rules, non-negotiable:
 1. Keep BJJ technique names and grappling English terms in English
-   (guard, half-guard, armbar, kimura, triangle, heel hook, sweep, pass,
-   underhook, overhook, grip, frame, base, hook, lapel, sleeve, mount,
-   side control, knee cut, smash pass, leg drag, berimbolo, de la riva,
-   x-guard, butterfly guard, closed guard, open guard, crossface,
-   whizzer, tap, pummel, sprawl, scramble, drill, setup, entry,
-   transition, top, bottom, pressure).
+   (guard, half-guard, closed/open/butterfly/x/de la Riva guard,
+   armbar, kimura, triangle, omoplata, heel hook, toe hold, kneebar,
+   rear naked choke, guillotine, darce, anaconda, ezekiel, bow and arrow,
+   sweep, pass, underhook, overhook, grip, frame, base, hook, lapel,
+   sleeve, collar, mount, side control, back mount, north-south, turtle,
+   knee cut, knee slice, smash pass, leg drag, toreando, berimbolo,
+   tripod pass, stack pass, body lock pass, crossface, whizzer, tap,
+   pummel, sprawl, scramble, drill, setup, entry, transition, top,
+   bottom, pressure, stack). Portuguese/Japanese names stay too
+   (juji gatame, sankaku, ashi garami, mata leão, kesa gatame).
 2. One input item = one output item, same order. Never merge, split, or
    drop items.
 3. Output MUST be a JSON object: {{"t": ["adapted item 1", ...]}} with
    the same number of items as the input, in the same order.
+
+EXAMPLES:
+EN: "Get your grip on the sleeve first."
+ES: "Coge el grip en la manga primero, fíjate."
+
+EN: "Use the butterfly hook to sweep."
+ES: "Usa el butterfly hook para hacer el sweep."
 """
 
 
-class OpenAITranslator(_BaseTranslator):
-    """Translate SRT files via OpenAI Chat Completions (gpt-4o-mini default).
+class _BaseChatTranslator(_BaseTranslator, abc.ABC):
+    """Shared logic for chat-completion-style providers (OpenAI, Ollama).
 
-    Batches subtitle items into a single JSON request for coherence and cost.
-    Uses ``response_format=json_object`` for reliable parsing.
+    Subclasses implement 4 abstract methods that diverge per provider dialect.
+    The retry/feedback/prompt-construction body is shared here.
     """
 
     # Number of subtitle items per request. 40 is a sweet spot:
@@ -248,29 +307,56 @@ class OpenAITranslator(_BaseTranslator):
     # - keeps context coherent
     # - well under any token limit even for long lines
     _BATCH_SIZE = 40
+    _MAX_RETRIES = 2
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str = "gpt-4o-mini",
-        source_lang: str = "EN",
-        target_lang: str = "ES",
-        temperature: float = 0.2,
-        base_url: str | None = None,
-    ) -> None:
-        super().__init__(source_lang, target_lang)
-        key = api_key or os.environ.get("OPENAI_API_KEY")
-        if not key:
-            raise ValueError("OPENAI_API_KEY not provided (env or constructor)")
-        self.api_key = key
-        self.model = model
-        self.temperature = temperature
-        self.url = (base_url or OPENAI_URL).rstrip("/")
-        # If base_url was passed without the /chat/completions suffix, fix it.
-        if not self.url.endswith("/chat/completions"):
-            if self.url.endswith("/v1"):
-                self.url = f"{self.url}/chat/completions"
+    # ---- HTTP dialect — subclasses MUST implement ----
+    @abc.abstractmethod
+    def _endpoint_url(self) -> str:
+        """Return the absolute chat-completion endpoint URL for the provider."""
+        ...
 
+    @abc.abstractmethod
+    def _request_headers(self) -> dict[str, str]:
+        """Return the HTTP headers (auth + content-type) for the provider."""
+        ...
+
+    @abc.abstractmethod
+    def _wrap_chat_body(self, messages: list[dict[str, Any]], json_mode: bool) -> dict[str, Any]:
+        """Build the provider-specific HTTP request body for a chat completion.
+
+        Args:
+            messages: list of ``{"role": ..., "content": ...}`` dicts.
+            json_mode: if True, instruct the provider to enforce strict JSON
+                output (OpenAI: ``response_format={"type":"json_object"}``;
+                Ollama: ``format="json"``). Subclasses may ignore the flag if
+                their provider does not support strict JSON, but must document
+                the deviation.
+
+        Returns:
+            Body dict ready for ``httpx.Client.post(json=...)``.
+        """
+        ...
+
+    @abc.abstractmethod
+    def _extract_message_content(self, resp_json: dict[str, Any]) -> str:
+        """Pull the assistant message text out of a parsed provider response."""
+        ...
+
+    # ---- Optional hook (default to module-level timeout) ----
+    def _request_timeout(self) -> float:
+        """Override per-provider HTTP timeout. Default = module-level ``_TIMEOUT`` (120s).
+
+        Hook reserved for subclasses. The current implementation of
+        ``_post_with_retry`` reads the timeout from the module-level
+        ``_TIMEOUT`` constant, so overriding this method has no effect today.
+        Override + a future task that wires this into the post helper is
+        required before tuning per-provider timeouts. Ollama local with
+        qwen2.5-7b can take 30-120s for large batches; OpenAI gpt-4o-mini
+        typically <5s.
+        """
+        return _TIMEOUT
+
+    # ---- Lógica compartida ----
     def translate_texts(self, texts: list[str]) -> list[str]:
         if not texts:
             return []
@@ -321,48 +407,47 @@ class OpenAITranslator(_BaseTranslator):
                     out.extend(self._translate_dubbing_batch([item], cps, fill_budget))
         return out
 
-    _MAX_RETRIES = 2
-
     def _translate_batch(self, texts: list[str]) -> list[str]:
         system = _BJJ_SYSTEM_PROMPT.format(
             src_name=_lang_name(self.source_lang),
             tgt_name=_lang_name(self.target_lang),
         )
         user_payload = {"items": texts}
-        body = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": (
-                        "Translate each item in `items`. Return JSON "
-                        '{"t": [...]} with the same number of items in the same order.\n'
-                        + json.dumps(user_payload, ensure_ascii=False)
-                    ),
-                },
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    "Translate each item in `items`. Return JSON "
+                    '{"t": [...]} with the same number of items in the same order.\n'
+                    + json.dumps(user_payload, ensure_ascii=False)
+                ),
+            },
+        ]
+        body = self._wrap_chat_body(messages, json_mode=True)
+        headers = self._request_headers()
 
         last_err: Exception | None = None
         for attempt in range(1 + self._MAX_RETRIES):
-            with httpx.Client(timeout=_TIMEOUT) as client:
-                r = client.post(self.url, headers=headers, json=body)
+            r = _post_with_retry(
+                self._endpoint_url(),
+                headers=headers,
+                json_body=body,
+                provider_label=self.provider_label,
+            )
             if r.status_code >= 400:
-                raise RuntimeError(f"OpenAI error {r.status_code}: {r.text[:300]}")
+                raise RuntimeError(
+                    f"{self.provider_label} error {r.status_code}: {r.text[:300]}"
+                )
 
             data = r.json()
             try:
-                content = data["choices"][0]["message"]["content"]
+                content = self._extract_message_content(data)
                 parsed = json.loads(content)
             except (KeyError, IndexError, json.JSONDecodeError) as exc:
-                raise RuntimeError(f"OpenAI response parse failed: {exc}") from exc
+                raise RuntimeError(
+                    f"{self.provider_label} response parse failed: {exc}"
+                ) from exc
 
             items = parsed.get("t")
             if not isinstance(items, list):
@@ -371,11 +456,11 @@ class OpenAITranslator(_BaseTranslator):
                 return [str(x) for x in items]
 
             last_err = RuntimeError(
-                f"OpenAI returned {len(items) if isinstance(items, list) else 'non-list'} items, "
+                f"{self.provider_label} returned {len(items) if isinstance(items, list) else 'non-list'} items, "
                 f"expected {len(texts)}"
             )
-            log.warning("OpenAI count mismatch (attempt %d/%d), retrying…",
-                        attempt + 1, 1 + self._MAX_RETRIES)
+            log.warning("%s count mismatch (attempt %d/%d), retrying…",
+                        self.provider_label, attempt + 1, 1 + self._MAX_RETRIES)
 
         raise last_err  # type: ignore[misc]
 
@@ -423,37 +508,38 @@ class OpenAITranslator(_BaseTranslator):
             'Return JSON {"t": [...]} with the same number of items in the '
             "same order.\n"
         )
-        body = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": (
-                        user_instruction
-                        + json.dumps({"items": payload_items}, ensure_ascii=False)
-                    ),
-                },
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    user_instruction
+                    + json.dumps({"items": payload_items}, ensure_ascii=False)
+                ),
+            },
+        ]
+        body = self._wrap_chat_body(messages, json_mode=True)
+        headers = self._request_headers()
 
         last_err: Exception | None = None
         for attempt in range(1 + self._MAX_RETRIES):
-            with httpx.Client(timeout=_TIMEOUT) as client:
-                r = client.post(self.url, headers=headers, json=body)
+            r = _post_with_retry(
+                self._endpoint_url(),
+                headers=headers,
+                json_body=body,
+                provider_label=self.provider_label,
+            )
             if r.status_code >= 400:
-                raise RuntimeError(f"OpenAI error {r.status_code}: {r.text[:300]}")
+                raise RuntimeError(
+                    f"{self.provider_label} error {r.status_code}: {r.text[:300]}"
+                )
             try:
-                content = r.json()["choices"][0]["message"]["content"]
+                content = self._extract_message_content(r.json())
                 parsed = json.loads(content)
             except (KeyError, IndexError, json.JSONDecodeError) as exc:
-                raise RuntimeError(f"OpenAI response parse failed: {exc}") from exc
+                raise RuntimeError(
+                    f"{self.provider_label} response parse failed: {exc}"
+                ) from exc
 
             result = parsed.get("t")
             if not isinstance(result, list):
@@ -461,7 +547,7 @@ class OpenAITranslator(_BaseTranslator):
             if not (isinstance(result, list) and len(result) == len(items)):
                 got = len(result) if isinstance(result, list) else "non-list"
                 last_err = RuntimeError(
-                    f"OpenAI returned non-matching count "
+                    f"{self.provider_label} returned non-matching count "
                     f"({got} vs {len(items)})"
                 )
                 # Feedback retry: tell the model the count is wrong so it
@@ -497,14 +583,16 @@ class OpenAITranslator(_BaseTranslator):
                 i for i, (txt, b) in enumerate(zip(result, budgets))
                 if len(txt) > int(b * upper_ratio)
             ]
-            # Undershoot check (only in fill_budget mode): fail below 0.90x.
-            # Anything shorter leaves audible silence gaps in the dub.
-            under_idx: list[int] = []
-            if fill_budget:
-                under_idx = [
-                    i for i, (txt, b) in enumerate(zip(result, budgets))
-                    if len(txt) < int(b * 0.90)
-                ]
+            # Undershoot check: the model tends to sacrifice content to
+            # respect the budget — produces ES that drops whole clauses
+            # ("and we'll first talk about the advantages" → "ventajas.").
+            # Reject anything below 0.70x of the EN budget in slot mode
+            # (0.90x in fill mode, stricter because slot = real talk time).
+            lower_ratio = 0.90 if fill_budget else 0.70
+            under_idx = [
+                i for i, (txt, b) in enumerate(zip(result, budgets))
+                if len(txt) < int(b * lower_ratio)
+            ]
             offenders = sorted(set(over_idx + under_idx))
 
             if not offenders or attempt == self._MAX_RETRIES:
@@ -541,10 +629,14 @@ class OpenAITranslator(_BaseTranslator):
                 'Return JSON {"t": [...]} with every item rewritten.\n'
                 "Details: "
                 if fill_budget else
-                "These items exceeded their budget. "
-                "Produce a shorter adaptation for ALL items again. "
-                'Return JSON {"t": [...]} with every item rewritten '
-                "to respect budgets.\nOverflow details: "
+                "These items missed budget. Rewrite ALL items (not only "
+                "offenders). Items marked TOO LONG: shorten without losing "
+                "technical content. Items marked TOO SHORT: you dropped "
+                "meaning from the source — add the missing clauses back in "
+                "natural coach Spanish. Content preservation is priority #1, "
+                "even if a rewritten item lands slightly over budget. "
+                'Return JSON {"t": [...]} with every item rewritten.\n'
+                "Details: "
             )
             body["messages"].append(
                 {"role": "assistant", "content": json.dumps({"t": result}, ensure_ascii=False)},
@@ -559,6 +651,100 @@ class OpenAITranslator(_BaseTranslator):
         if last_err:
             raise last_err
         return result
+
+
+class OpenAITranslator(_BaseChatTranslator):
+    """Translate SRT files via OpenAI Chat Completions (gpt-4o-mini default).
+
+    Batches subtitle items into a single JSON request for coherence and cost.
+    Uses ``response_format=json_object`` for reliable parsing.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gpt-4o-mini",
+        source_lang: str = "EN",
+        target_lang: str = "ES",
+        temperature: float = 0.2,
+        base_url: str | None = None,
+    ) -> None:
+        super().__init__(source_lang, target_lang)
+        key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise ValueError("OPENAI_API_KEY not provided (env or constructor)")
+        self.api_key = key
+        self.model = model
+        self.temperature = temperature
+        self.provider_label = "OpenAI"
+        url = (base_url or OPENAI_URL).rstrip("/")
+        # If base_url was passed without the /chat/completions suffix, fix it.
+        if not url.endswith("/chat/completions"):
+            if url.endswith("/v1"):
+                url = f"{url}/chat/completions"
+        self.url = url
+
+    def _endpoint_url(self) -> str:
+        return self.url
+
+    def _request_headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _wrap_chat_body(self, messages: list[dict], json_mode: bool) -> dict:
+        body = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "messages": messages,
+        }
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        return body
+
+    def _extract_message_content(self, resp_json: dict) -> str:
+        return resp_json["choices"][0]["message"]["content"]
+
+
+class OllamaTranslator(_BaseChatTranslator):
+    """Translate via Ollama native /api/chat with strict JSON mode."""
+
+    def __init__(
+        self,
+        model: str = "qwen2.5:7b-instruct-q4_K_M",
+        source_lang: str = "EN",
+        target_lang: str = "ES",
+        temperature: float = 0.2,
+        base_url: str | None = None,
+    ) -> None:
+        super().__init__(source_lang, target_lang)
+        self.model = model
+        self.temperature = temperature
+        self.provider_label = "Ollama"
+        self.base_url = (
+            base_url or os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+        ).rstrip("/")
+
+    def _endpoint_url(self) -> str:
+        return f"{self.base_url}/api/chat"
+
+    def _request_headers(self) -> dict[str, str]:
+        return {"Content-Type": "application/json"}
+
+    def _wrap_chat_body(self, messages: list[dict], json_mode: bool) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": self.temperature},
+        }
+        if json_mode:
+            body["format"] = "json"
+        return body
+
+    def _extract_message_content(self, resp_json: dict[str, Any]) -> str:
+        return resp_json["message"]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -576,19 +762,18 @@ def make_translator(
 ) -> _BaseTranslator:
     """Build a translator for the requested provider name."""
     p = (provider or "").lower().strip()
+    if p == "ollama":
+        return OllamaTranslator(
+            model=model or "qwen2.5:7b-instruct-q4_K_M",
+            source_lang=source_lang,
+            target_lang=target_lang,
+        )
     if p in ("openai", "gpt", "chatgpt"):
         return OpenAITranslator(
             api_key=api_key,
             model=model or "gpt-4o-mini",
             source_lang=source_lang,
             target_lang=target_lang,
-        )
-    if p in ("deepl",):
-        return DeepLTranslator(
-            api_key=api_key,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            formality=formality,
         )
     raise ValueError(f"Unknown translation provider: {provider!r}")
 

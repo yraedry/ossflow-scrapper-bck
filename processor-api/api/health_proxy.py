@@ -15,12 +15,15 @@ BACKENDS: dict[str, str] = {
     "chapter-splitter": os.environ.get("SPLITTER_URL", "http://chapter-splitter:8001"),
     "subtitle-generator": os.environ.get("SUBS_URL", "http://subtitle-generator:8002"),
     "dubbing-generator": os.environ.get("DUBBING_URL", "http://dubbing-generator:8003"),
+    "ollama": os.environ.get("OLLAMA_URL", "http://ollama:11434"),
 }
 
 
 async def _ping(client: httpx.AsyncClient, service: str, base: str) -> dict:
+    # Ollama no expone /health — usa /api/tags como liveness probe.
+    health_path = "/api/tags" if service == "ollama" else "/health"
     try:
-        r = await client.get(f"{base}/health", timeout=3.0)
+        r = await client.get(f"{base}{health_path}", timeout=3.0)
         if r.status_code == 200:
             return {"service": service, "status": "up", "body": r.json()}
         return {"service": service, "status": "down", "error": f"HTTP {r.status_code}"}

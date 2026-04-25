@@ -8,3 +8,7 @@ requires-python = ">=3.10"
 testpaths = ["tests"]
 python_files = "test_*.py"
 addopts = "-v --tb=short"
+markers = [
+    "requires_ollama: requiere servicio Ollama corriendo en localhost:11434",
+    "quality: test de calidad sobre golden set BJJ",
+]

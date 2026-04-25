@@ -132,16 +132,17 @@ async def restart_subtitle_service() -> dict:
 def _key_for_provider(provider: str, override: Optional[str]) -> Optional[str]:
     if override:
         return override
-    if provider == "openai":
+    p = (provider or "").lower().strip()
+    if p == "openai":
         return get_setting("openai_api_key")
-    if provider == "deepl":
-        return get_setting("deepl_api_key")
+    if p == "ollama":
+        return None  # ollama no necesita api_key
     return None
 
 
 @router.post("/translate")
 async def translate(body: TranslateBody) -> dict:
-    provider = (body.provider or get_setting("translation_provider") or "openai").lower()
+    provider = (body.provider or get_setting("translation_provider") or "ollama").lower()
     fallback = (
         body.fallback_provider
         or get_setting("translation_fallback_provider")
@@ -161,18 +162,20 @@ async def translate(body: TranslateBody) -> dict:
         payload["formality"] = body.formality
 
     api_key = _key_for_provider(provider, body.api_key)
-    if not api_key:
+    if provider != "ollama" and not api_key:
         raise HTTPException(
             status_code=400,
             detail=f"{provider} API key missing (set it in Settings)",
         )
-    payload["api_key"] = api_key
+    if api_key:
+        payload["api_key"] = api_key
 
     if fallback and fallback != provider:
         fb_key = _key_for_provider(fallback, body.fallback_api_key)
-        if fb_key:
+        if fallback == "ollama" or fb_key:
             payload["fallback_provider"] = fallback
-            payload["fallback_api_key"] = fb_key
+            if fb_key:
+                payload["fallback_api_key"] = fb_key
 
     if body.out_path:
         payload["out_path"] = _translate(body.out_path)
