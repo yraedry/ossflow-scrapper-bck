@@ -29,7 +29,13 @@ RUN wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
  && wget -qO /etc/apt/sources.list.d/lunarg-vulkan.list \
         https://packages.lunarg.com/vulkan/${VULKAN_SDK_VERSION}/lunarg-vulkan-${VULKAN_SDK_VERSION}-jammy.list \
  && apt-get update && apt-get install -y --no-install-recommends vulkan-sdk \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && echo "=== Vulkan SDK installed ===" \
+ && dpkg -l | grep -E "vulkan|spirv|glslang" \
+ && echo "=== Vulkan-Headers version ===" \
+ && grep -E "VK_HEADER_VERSION|VK_HEADER_VERSION_COMPLETE" /usr/include/vulkan/vulkan_core.h | head -5 \
+ && echo "=== eMesaDozen present? ===" \
+ && grep -c "eMesaDozen" /usr/include/vulkan/vulkan_enums.hpp || true
 
 RUN git clone --recurse-submodules ${S2CPP_REPO} /src/s2.cpp \
  && cd /src/s2.cpp && git checkout ${S2CPP_REF} \
