@@ -313,12 +313,29 @@ volumes:
   tg-session:
   tg-cache:
   ollama-models:
+  # NAS biblioteca. Two modes (selected by .env):
+  #
+  # 1) Host-level mount (LXC + Proxmox mp0 / fstab / NFS done outside Docker):
+  #      NAS_VOLUME_TYPE=none
+  #      NAS_VOLUME_DEVICE=/biblioteca       # the host path
+  #      NAS_VOLUME_OPTS=bind
+  #    The kernel mount is reused; Docker just bind-mounts the directory.
+  #    Use this on the LXC where Proxmox already mounts the NAS at /biblioteca.
+  #
+  # 2) Docker-managed CIFS (workstation, no host-level mount):
+  #      NAS_VOLUME_TYPE=cifs
+  #      NAS_VOLUME_DEVICE=//<NAS_HOST>/<share>
+  #      NAS_VOLUME_OPTS=username=...,password=...,uid=0,gid=0,vers=3.0,...
+  #    Compose mounts CIFS from inside the docker volume driver.
+  #
+  # Defaults preserve the legacy CIFS workstation setup so existing
+  # deployments keep working without an .env update.
   nas-library:
     driver: local
     driver_opts:
-      type: cifs
-      device: //${NAS_HOST}/${NAS_SHARE}
-      o: "username=${NAS_USER},password=${NAS_PASS},uid=0,gid=0,vers=3.0,cache=strict,iocharset=utf8"
+      type: ${NAS_VOLUME_TYPE:-cifs}
+      device: ${NAS_VOLUME_DEVICE:-//${NAS_HOST}/${NAS_SHARE}}
+      o: ${NAS_VOLUME_OPTS:-username=${NAS_USER},password=${NAS_PASS},uid=0,gid=0,vers=3.0,cache=strict,iocharset=utf8}
 
 networks:
   bjj_net:
