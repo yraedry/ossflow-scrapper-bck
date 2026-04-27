@@ -2,43 +2,40 @@
 # Build context: ../python
 
 # ----- Stage 1: s2.cpp Vulkan builder -----------------------------------
-# MUST match the runtime base's GLIBC (bjj-base = Ubuntu 22.04 / CUDA 12.4
-# = GLIBC 2.35). Ubuntu 24.04 builds break at runtime with `GLIBC_2.38 not
-# found` because the resulting binary links symbols introduced after 2.35.
-# We stay on jammy and patch the single ggml-vulkan line that breaks with
-# jammy's older Vulkan-Hpp (1.3.204): `vk::PhysicalDeviceProperties2 →
-# VkPhysicalDeviceProperties2` implicit conversion. `auto props = …` works
-# with both old and new Vulkan-Hpp.
+# Stay on Ubuntu 22.04 (GLIBC 2.35 — matches bjj-base CUDA 12.4 runtime),
+# but pull modern Vulkan SDK from the LunarG apt repo. Ubuntu 22.04's
+# distro libvulkan-dev is 1.3.204 (Dec 2021) which is too old: it lacks
+# enum members like `eMesaDozen` and conversion operators that current
+# ggml-vulkan.cpp depends on. LunarG ships 1.4.x against the same base
+# OS so we keep GLIBC compatibility AND get headers that compile.
 FROM ubuntu:22.04 AS s2cpp-builder
 ARG S2CPP_REPO=https://github.com/rodrigomatta/s2.cpp
 ARG S2CPP_REF=e48ce8e02d8335bd9a0ba94679f605724b31d123
+ARG VULKAN_SDK_VERSION=1.4.313
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git ca-certificates pkg-config \
-        libvulkan-dev glslang-tools spirv-tools \
+        wget gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# LunarG Vulkan SDK (modern Vulkan-Headers + Vulkan-Hpp + glslc + spirv).
+# URL form: https://packages.lunarg.com/vulkan/<VER>/lunarg-vulkan-<VER>-jammy.list
+# (versioned variants pin a specific SDK release; the unversioned
+# `lunarg-vulkan-jammy.list` always points to latest, which we avoid
+# for build reproducibility).
+RUN wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+        | gpg --dearmor -o /etc/apt/trusted.gpg.d/lunarg.gpg \
+ && wget -qO /etc/apt/sources.list.d/lunarg-vulkan.list \
+        https://packages.lunarg.com/vulkan/${VULKAN_SDK_VERSION}/lunarg-vulkan-${VULKAN_SDK_VERSION}-jammy.list \
+ && apt-get update && apt-get install -y --no-install-recommends vulkan-sdk \
+ && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --recurse-submodules ${S2CPP_REPO} /src/s2.cpp \
  && cd /src/s2.cpp && git checkout ${S2CPP_REF} \
  && git submodule update --init --recursive
 
 WORKDIR /src/s2.cpp
-# Patch ggml-vulkan.cpp for compatibility with jammy's Vulkan-Hpp 1.3.204.
-# The unique line `VkPhysicalDeviceProperties2 props = vkdev.getProperties2();`
-# fails because:
-# - Vulkan-Hpp 1.3.204 returns vk::PhysicalDeviceProperties2 (no implicit
-#   conversion to the C struct)
-# - the pointer overload `getProperties2(&p)` doesn't exist in 1.3.204
-#   either — it interprets &p as a Dispatch parameter.
-# Use the raw C API instead: `static_cast<VkPhysicalDevice>(vkdev)` peels
-# the C++ wrapper to call the C function directly. Works on every Vulkan
-# header version.
-RUN sed -i \
-        -e 's|VkPhysicalDeviceProperties2 props = vkdev.getProperties2();|VkPhysicalDeviceProperties2 props{}; props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; vkGetPhysicalDeviceProperties2(static_cast<VkPhysicalDevice>(vkdev), \&props);|' \
-        /src/s2.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp \
- && grep -n "ggml_vk_intel_shader_core_count" /src/s2.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp | head -3
-
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DS2_VULKAN=ON \
  && cmake --build build --parallel "$(nproc)" \
  && echo "=== Build artifacts ===" \
