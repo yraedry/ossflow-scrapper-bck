@@ -15,6 +15,10 @@
 # Voice samples (large binaries, not source-of-truth)
 dubbing-generator/voices/
 
+# Local TTS model weights (Fish Audio S2-Pro GGUF, ~4.5 GB).
+# Bind-mounted into dubbing-generator at /models/s2pro:ro.
+models/
+
 ### Node ###
 # Logs
 logs
