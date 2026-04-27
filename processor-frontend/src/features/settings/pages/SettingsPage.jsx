@@ -100,11 +100,17 @@ const processingSchema = z.object({
 })
 
 const ttsSchema = z.object({
-  tts_engine: z.enum(['elevenlabs', 'piper', 'kokoro']).default('elevenlabs'),
+  tts_engine: z.enum(['s2pro', 'elevenlabs', 'piper', 'kokoro']).default('elevenlabs'),
   elevenlabs_voice_id: z.string().optional().nullable(),
   elevenlabs_model_id: z.string().optional().nullable(),
   piper_model_path: z.string().optional().nullable(),
   kokoro_voice: z.enum(['em_alex', 'em_santa']).optional().nullable(),
+  s2_voice_profile: z.string().optional().nullable(),
+  s2_ref_text: z.string().optional().nullable(),
+  s2_temperature: z.coerce.number().min(0.1).max(1.5).optional(),
+  s2_top_p: z.coerce.number().min(0.1).max(1.0).optional(),
+  s2_top_k: z.coerce.number().int().min(1).max(200).optional(),
+  s2_max_tokens: z.coerce.number().int().min(128).max(2048).optional(),
 })
 
 const oracleSchema = z.object({
@@ -595,6 +601,14 @@ function TtsSection({ settings }) {
       elevenlabs_model_id: settings?.elevenlabs_model_id || 'eleven_multilingual_v2',
       piper_model_path: settings?.piper_model_path || '/models/piper/es_ES-sharvard-medium.onnx',
       kokoro_voice: settings?.kokoro_voice || 'em_alex',
+      s2_voice_profile: settings?.s2_voice_profile || 'voice_martin_osborne_24k.wav',
+      s2_ref_text:
+        settings?.s2_ref_text ||
+        'nunca te olvidé, nunca, el último beso que me diste todavía está grabado en mi corazón, por el día todo es más fácil. pero, todavía sueño contigo.',
+      s2_temperature: settings?.s2_temperature ?? 0.8,
+      s2_top_p: settings?.s2_top_p ?? 0.8,
+      s2_top_k: settings?.s2_top_k ?? 30,
+      s2_max_tokens: settings?.s2_max_tokens ?? 1024,
     },
   })
 
@@ -609,6 +623,12 @@ function TtsSection({ settings }) {
         elevenlabs_model_id: values.elevenlabs_model_id || null,
         piper_model_path: values.piper_model_path || null,
         kokoro_voice: values.kokoro_voice || null,
+        s2_voice_profile: values.s2_voice_profile || null,
+        s2_ref_text: values.s2_ref_text || null,
+        s2_temperature: values.s2_temperature,
+        s2_top_p: values.s2_top_p,
+        s2_top_k: values.s2_top_k,
+        s2_max_tokens: values.s2_max_tokens,
       }
       await updateMut.mutateAsync(payload)
       toast.success('TTS guardado')
@@ -644,6 +664,7 @@ function TtsSection({ settings }) {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="s2pro">S2-Pro (local, clonación de voz, Vulkan)</SelectItem>
                 <SelectItem value="elevenlabs">ElevenLabs (cloud, clonación de voz, de pago)</SelectItem>
                 <SelectItem value="piper">Piper (local, voz preset ES, gratis, rápido)</SelectItem>
                 <SelectItem value="kokoro">Kokoro-82M (local, voz preset ES, GPU, mejor prosodia)</SelectItem>
@@ -690,6 +711,76 @@ function TtsSection({ settings }) {
                 Path absoluto al .onnx dentro del contenedor dubbing-generator. La imagen incluye <code>es_ES-sharvard-medium</code> por defecto.
               </p>
             </div>
+          )}
+
+          {engine === 's2pro' && (
+            <>
+              <div>
+                <Label htmlFor="s2_voice_profile">Perfil de voz (archivo en /voices)</Label>
+                <Input
+                  id="s2_voice_profile"
+                  placeholder="voice_martin_osborne_24k.wav"
+                  {...form.register('s2_voice_profile')}
+                  className="mt-1.5 font-mono"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Nombre del archivo WAV (16-24 kHz mono, 5-30 s) dentro del directorio bind-mounted en <code>/voices</code>.
+                </p>
+              </div>
+              <div>
+                <Label htmlFor="s2_ref_text">Transcripción de referencia</Label>
+                <textarea
+                  id="s2_ref_text"
+                  rows={3}
+                  {...form.register('s2_ref_text')}
+                  className="mt-1.5 block w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Debe coincidir EXACTAMENTE con lo que se dice en el WAV. La discrepancia colapsa la calidad de clonación.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="s2_temperature">Temperature</Label>
+                  <Input
+                    id="s2_temperature"
+                    type="number" step="0.05" min="0.1" max="1.5"
+                    {...form.register('s2_temperature')}
+                    className="mt-1.5"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="s2_top_p">Top-P</Label>
+                  <Input
+                    id="s2_top_p"
+                    type="number" step="0.05" min="0.1" max="1.0"
+                    {...form.register('s2_top_p')}
+                    className="mt-1.5"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="s2_top_k">Top-K</Label>
+                  <Input
+                    id="s2_top_k"
+                    type="number" step="1" min="1" max="200"
+                    {...form.register('s2_top_k')}
+                    className="mt-1.5"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="s2_max_tokens">Max tokens</Label>
+                  <Input
+                    id="s2_max_tokens"
+                    type="number" step="64" min="128" max="2048"
+                    {...form.register('s2_max_tokens')}
+                    className="mt-1.5"
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Servidor s2.cpp embebido en el contenedor. Modelo q6_k bind-mounted en <code>/models/s2pro</code>. Licencia non-commercial.
+              </p>
+            </>
           )}
 
           {engine === 'kokoro' && (
