@@ -25,8 +25,14 @@ RUN git clone --recurse-submodules ${S2CPP_REPO} /src/s2.cpp \
 WORKDIR /src/s2.cpp
 # -DS2_VULKAN=ON is the s2.cpp option name; CMakeLists forwards it to
 # GGML_VULKAN. Verified locally on 2026-04-27 against SHA e48ce8e0.
+# CMAKE_RUNTIME_OUTPUT_DIRECTORY pins the s2 executable to build/bin/
+# alongside the ggml shared libs (which ggml's CMakeLists already routes
+# there via the same variable). On Linux single-config builds, without
+# this, the s2 binary lands in build/ (root) and the COPY below misses it.
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DS2_VULKAN=ON \
- && cmake --build build --parallel "$(nproc)"
+        -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/src/s2.cpp/build/bin \
+ && cmake --build build --parallel "$(nproc)" \
+ && ls -la /src/s2.cpp/build/bin/
 
 # ----- Stage 2: dubbing-generator runtime -------------------------------
 FROM bjj-base:latest
