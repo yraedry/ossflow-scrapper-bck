@@ -467,6 +467,28 @@ def _client_and_payload(
             )
             if kokoro_voice:
                 opts["kokoro_voice"] = str(kokoro_voice)
+        elif opts["tts_engine"] == "s2pro":
+            # Build absolute path from the basename stored in settings.
+            voice_basename = (
+                options.get("s2_voice_profile")
+                or get_setting("s2_voice_profile")
+                or "voice_martin_osborne_24k.wav"
+            )
+            opts["s2_ref_audio_path"] = f"/voices/{voice_basename}"
+            ref_text = options.get("s2_ref_text") or get_setting("s2_ref_text")
+            if ref_text:
+                opts["s2_ref_text"] = str(ref_text)
+            for k, default in (
+                ("s2_temperature", 0.8),
+                ("s2_top_p", 0.8),
+                ("s2_top_k", 30),
+                ("s2_max_tokens", 1024),
+            ):
+                v = options.get(k)
+                if v is None:
+                    v = get_setting(k)
+                if v is not None:
+                    opts[k] = v
         return dubbing_client(), {**base, "options": opts}, False
     raise ValueError(f"Unknown step: {step_name}")
 
