@@ -14,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git ca-certificates pkg-config \
-        libvulkan-dev vulkan-headers \
+        libvulkan-dev \
         glslang-tools glslc spirv-tools \
     && rm -rf /var/lib/apt/lists/*
 
