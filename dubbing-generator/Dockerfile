@@ -26,12 +26,16 @@ RUN git clone --recurse-submodules ${S2CPP_REPO} /src/s2.cpp \
 WORKDIR /src/s2.cpp
 # Patch ggml-vulkan.cpp for compatibility with jammy's Vulkan-Hpp 1.3.204.
 # The unique line `VkPhysicalDeviceProperties2 props = vkdev.getProperties2();`
-# fails because Vulkan-Hpp 1.3.204 doesn't auto-convert vk::PhysicalDeviceProperties2
-# to the C struct. The 8 other call sites in this same file all use the
-# pointer overload `device.getProperties2(&props2)` which works on every
-# Vulkan-Hpp version. Replace the failing line with the same idiom.
+# fails because:
+# - Vulkan-Hpp 1.3.204 returns vk::PhysicalDeviceProperties2 (no implicit
+#   conversion to the C struct)
+# - the pointer overload `getProperties2(&p)` doesn't exist in 1.3.204
+#   either — it interprets &p as a Dispatch parameter.
+# Use the raw C API instead: `static_cast<VkPhysicalDevice>(vkdev)` peels
+# the C++ wrapper to call the C function directly. Works on every Vulkan
+# header version.
 RUN sed -i \
-        -e 's|VkPhysicalDeviceProperties2 props = vkdev.getProperties2();|VkPhysicalDeviceProperties2 props{}; props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; vkdev.getProperties2(\&props);|' \
+        -e 's|VkPhysicalDeviceProperties2 props = vkdev.getProperties2();|VkPhysicalDeviceProperties2 props{}; props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; vkGetPhysicalDeviceProperties2(static_cast<VkPhysicalDevice>(vkdev), \&props);|' \
         /src/s2.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp \
  && grep -n "ggml_vk_intel_shader_core_count" /src/s2.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp | head -3
 
