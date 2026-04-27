@@ -180,7 +180,6 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
             config_kwargs.setdefault("inter_phrase_crossfade_ms", 100)
             config_kwargs.setdefault("force_crossfade_ms", 250)
             config_kwargs.setdefault("rms_jump_crossfade_ms", 0)
-            config_kwargs.setdefault("rms_jump_crossfade_ms", 0)
 
         config = DubbingConfig(**config_kwargs)
 
