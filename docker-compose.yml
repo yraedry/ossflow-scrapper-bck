@@ -222,8 +222,11 @@ services:
       - DUBBING_TTS_ENGINE=${DUBBING_TTS_ENGINE:-}
       # S2-Pro GGUF/tokenizer paths inside the container (paired with the
       # ${S2PRO_MODEL_DIR} bind-mount above).
-      - S2PRO_GGUF_PATH=/models/s2pro/s2-pro-q6_k.gguf
-      - S2PRO_TOKENIZER_PATH=/models/s2pro/tokenizer.json
+      # GGUF + tokenizer paths inside the container. Override via .env to
+      # swap quantization without rebuilding (e.g. Q6_K → Q4_K_M for 6 GB
+      # cards: S2PRO_GGUF_PATH=/models/s2pro/s2-pro-q4_k_m.gguf).
+      - S2PRO_GGUF_PATH=${S2PRO_GGUF_PATH:-/models/s2pro/s2-pro-q6_k.gguf}
+      - S2PRO_TOKENIZER_PATH=${S2PRO_TOKENIZER_PATH:-/models/s2pro/tokenizer.json}
     networks:
       - bjj_net
     healthcheck:
