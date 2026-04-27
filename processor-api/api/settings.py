@@ -60,6 +60,22 @@ _DEFAULTS: dict[str, Any] = {
     "piper_model_path": "/models/piper/es_ES-sharvard-medium.onnx",
     # Voz Kokoro-82M (preset ES masculina). Alternativa: em_santa.
     "kokoro_voice": "em_alex",
+    # Fish Audio S2-Pro local voice-clone TTS. Engine value "s2pro" enables
+    # the dubbing-generator to call the in-container s2.cpp HTTP server.
+    # ``s2_voice_profile`` is a basename inside /voices; the dubbing-generator
+    # rebuilds the absolute path before calling the server. ``s2_ref_text``
+    # MUST exactly match the audio in the voice WAV — drift collapses
+    # voice-clone quality.
+    "s2_voice_profile": "voice_martin_osborne_24k.wav",
+    "s2_ref_text": (
+        "nunca te olvidé, nunca, el último beso que me diste todavía está "
+        "grabado en mi corazón, por el día todo es más fácil. pero, todavía "
+        "sueño contigo."
+    ),
+    "s2_temperature": 0.8,
+    "s2_top_p": 0.8,
+    "s2_top_k": 30,
+    "s2_max_tokens": 1024,
     # OpenAI post-process for the English SRT produced by WhisperX.
     # Cleans syllable-duplication artifacts and broken mid-clause boundaries
     # while preserving timestamps and block count. Uses openai_api_key.
@@ -322,9 +338,11 @@ async def put_settings(request: Request):
 
     if "tts_engine" in body:
         te = body["tts_engine"]
-        if not isinstance(te, str) or te.strip().lower() not in ("elevenlabs", "piper", "kokoro"):
+        if not isinstance(te, str) or te.strip().lower() not in (
+            "s2pro", "elevenlabs", "piper", "kokoro",
+        ):
             return JSONResponse(
-                {"error": "tts_engine must be 'elevenlabs', 'piper' or 'kokoro'"},
+                {"error": "tts_engine must be 's2pro', 'elevenlabs', 'piper' or 'kokoro'"},
                 status_code=422,
             )
         current["tts_engine"] = te.strip().lower()
@@ -357,6 +375,55 @@ async def put_settings(request: Request):
                 status_code=422,
             )
         current["kokoro_voice"] = v.strip() if isinstance(v, str) else v
+
+    if "s2_voice_profile" in body:
+        v = body["s2_voice_profile"]
+        if v is not None and not isinstance(v, str):
+            return JSONResponse(
+                {"error": "s2_voice_profile must be a string or null"},
+                status_code=422,
+            )
+        current["s2_voice_profile"] = v.strip() if isinstance(v, str) else v
+
+    if "s2_ref_text" in body:
+        v = body["s2_ref_text"]
+        if not isinstance(v, str) or not v.strip():
+            return JSONResponse(
+                {"error": "s2_ref_text must be a non-empty string"},
+                status_code=422,
+            )
+        current["s2_ref_text"] = v
+
+    for fkey, lo, hi in (
+        ("s2_temperature", 0.1, 1.5),
+        ("s2_top_p", 0.1, 1.0),
+    ):
+        if fkey in body:
+            v = body[fkey]
+            if not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
+                return JSONResponse(
+                    {"error": f"{fkey} must be a number in [{lo}, {hi}]"},
+                    status_code=422,
+                )
+            current[fkey] = float(v)
+
+    if "s2_top_k" in body:
+        v = body["s2_top_k"]
+        if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= 200:
+            return JSONResponse(
+                {"error": "s2_top_k must be an integer in [1, 200]"},
+                status_code=422,
+            )
+        current["s2_top_k"] = v
+
+    if "s2_max_tokens" in body:
+        v = body["s2_max_tokens"]
+        if not isinstance(v, int) or isinstance(v, bool) or not 128 <= v <= 2048:
+            return JSONResponse(
+                {"error": "s2_max_tokens must be an integer in [128, 2048]"},
+                status_code=422,
+            )
+        current["s2_max_tokens"] = v
 
     save_settings(current)
     return current
