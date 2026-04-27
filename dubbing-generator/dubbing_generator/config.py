@@ -83,7 +83,7 @@ class DubbingConfig:
     # are kept as dataclass defaults so DubbingConfig stays backwards-
     # compatible with callers that reference them, but the code path is
     # gone.
-    tts_engine: str = "elevenlabs"
+    tts_engine: str = "s2pro"     # was: "elevenlabs"
     xtts_model_name: str = ""
     xtts_config_path: str = ""
     xtts_checkpoint_dir: str = ""
@@ -181,6 +181,43 @@ class DubbingConfig:
     kokoro_lang_code: str = "e"           # Spanish
     kokoro_voice: str = "em_alex"
     kokoro_speed: float = 1.0
+
+    # ------------------------------------------------------------------
+    # Fish Audio S2-Pro (local Vulkan voice-clone TTS)
+    # ------------------------------------------------------------------
+    # s2.cpp inference engine running as HTTP server inside the container.
+    # The server is booted at FastAPI startup (s2pro_server_manager) and
+    # stays resident — model load takes ~10 s and we don't want to pay it
+    # per phrase.
+    #
+    # IMPORTANT: ``s2_ref_text`` MUST match what the speaker says in the
+    # ``s2_ref_audio_path`` WAV exactly. Drift between the two collapses
+    # voice-clone quality (the model conditions on aligned phoneme→codec
+    # pairs). If you swap the ref WAV, swap this string too.
+    s2_server_host: str = "127.0.0.1"
+    s2_server_port: int = 3030
+    s2_gguf_path: str = "/models/s2pro/s2-pro-q6_k.gguf"
+    s2_tokenizer_path: str = "/models/s2pro/tokenizer.json"
+    s2_ref_audio_path: str = "/voices/voice_martin_osborne_24k.wav"
+    s2_ref_text: str = (
+        "nunca te olvidé, nunca, el último beso que me diste todavía está "
+        "grabado en mi corazón, por el día todo es más fácil. pero, todavía "
+        "sueño contigo."
+    )
+    # Sampling: fish-speech upstream defaults. Don't lower these blindly —
+    # narrow sampling on Spanish flattens prosody. 0.8/0.8/30 was validated
+    # on 5 BJJ-ES smoke phrases on 2026-04-27.
+    s2_temperature: float = 0.8
+    s2_top_p: float = 0.8
+    s2_top_k: int = 30
+    s2_max_tokens: int = 1024
+    # Per-phrase HTTP timeout. RTX 2060 + Vulkan: ~6 s audio in ~120 s.
+    # 180 s leaves room for the longest merged phrase (~160 chars).
+    s2_request_timeout: float = 180.0
+    # Server boot health timeout. GGUF mmap from NFS-backed /models/s2pro
+    # can take 20+ s on cold cache; 60 s is generous.
+    s2_health_timeout_s: float = 60.0
+    s2_vulkan_device: int = 0
 
     # ------------------------------------------------------------------
     # Voice cloning
