@@ -240,7 +240,12 @@ def _start_s2pro_server() -> None:
     from dubbing_generator.config import DubbingConfig
     from dubbing_generator.tts.s2pro_server_manager import S2ProServerManager
 
-    engine = os.environ.get("DUBBING_TTS_ENGINE", "s2pro").strip().lower()
+    # Read env, but treat empty string as "use default" — compose passes the
+    # var through with `${DUBBING_TTS_ENGINE:-}` so the key is always present
+    # (just empty when the operator hasn't pinned an engine globally). The
+    # bare os.environ.get(..., "s2pro") default only kicks in when the key
+    # is missing entirely, so we coalesce empty → "s2pro" explicitly.
+    engine = (os.environ.get("DUBBING_TTS_ENGINE") or "s2pro").strip().lower()
     cfg = DubbingConfig(tts_engine=engine)
     manager = S2ProServerManager(cfg)
     manager.start()

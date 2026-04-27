@@ -2,20 +2,21 @@
 # Build context: ../python
 
 # ----- Stage 1: s2.cpp Vulkan builder -----------------------------------
-# Ubuntu 24.04 (noble) ships Vulkan-Headers 1.3.275 + matching Vulkan-Hpp;
-# 22.04 (jammy)'s 1.3.204 is too old and breaks ggml-vulkan compilation
-# (vk::PhysicalDeviceProperties2 → VkPhysicalDeviceProperties2 conversion
-# was removed). Builder image bump only — the compiled binary links against
-# libvulkan.so.1 which is forward-compatible at runtime.
-FROM ubuntu:24.04 AS s2cpp-builder
+# MUST match the runtime base's GLIBC (bjj-base = Ubuntu 22.04 / CUDA 12.4
+# = GLIBC 2.35). Ubuntu 24.04 builds break at runtime with `GLIBC_2.38 not
+# found` because the resulting binary links symbols introduced after 2.35.
+# We stay on jammy and patch the single ggml-vulkan line that breaks with
+# jammy's older Vulkan-Hpp (1.3.204): `vk::PhysicalDeviceProperties2 →
+# VkPhysicalDeviceProperties2` implicit conversion. `auto props = …` works
+# with both old and new Vulkan-Hpp.
+FROM ubuntu:22.04 AS s2cpp-builder
 ARG S2CPP_REPO=https://github.com/rodrigomatta/s2.cpp
 ARG S2CPP_REF=e48ce8e02d8335bd9a0ba94679f605724b31d123
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git ca-certificates pkg-config \
-        libvulkan-dev \
-        glslang-tools glslc spirv-tools \
+        libvulkan-dev glslang-tools spirv-tools \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --recurse-submodules ${S2CPP_REPO} /src/s2.cpp \
@@ -23,16 +24,22 @@ RUN git clone --recurse-submodules ${S2CPP_REPO} /src/s2.cpp \
  && git submodule update --init --recursive
 
 WORKDIR /src/s2.cpp
-# -DS2_VULKAN=ON is the s2.cpp option name; CMakeLists forwards it to
-# GGML_VULKAN. Verified locally on 2026-04-27 against SHA e48ce8e0.
-# CMAKE_RUNTIME_OUTPUT_DIRECTORY pins the s2 executable to build/bin/
-# alongside the ggml shared libs (which ggml's CMakeLists already routes
-# there via the same variable). On Linux single-config builds, without
-# this, the s2 binary lands in build/ (root) and the COPY below misses it.
+# Patch ggml-vulkan.cpp for compatibility with jammy's Vulkan-Hpp 1.3.204.
+# The unique line `VkPhysicalDeviceProperties2 props = vkdev.getProperties2();`
+# fails because Vulkan-Hpp 1.3.204 doesn't auto-convert vk::PhysicalDeviceProperties2
+# to the C struct. The 8 other call sites in this same file all use the
+# pointer overload `device.getProperties2(&props2)` which works on every
+# Vulkan-Hpp version. Replace the failing line with the same idiom.
+RUN sed -i \
+        -e 's|VkPhysicalDeviceProperties2 props = vkdev.getProperties2();|VkPhysicalDeviceProperties2 props{}; props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; vkdev.getProperties2(\&props);|' \
+        /src/s2.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp \
+ && grep -n "ggml_vk_intel_shader_core_count" /src/s2.cpp/ggml/src/ggml-vulkan/ggml-vulkan.cpp | head -3
+
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DS2_VULKAN=ON \
-        -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/src/s2.cpp/build/bin \
  && cmake --build build --parallel "$(nproc)" \
- && ls -la /src/s2.cpp/build/bin/
+ && echo "=== Build artifacts ===" \
+ && find /src/s2.cpp/build -maxdepth 4 -name "s2" -type f -executable -exec ls -la {} + \
+ && find /src/s2.cpp/build -name "libggml*.so*" -exec ls -la {} +
 
 # ----- Stage 2: dubbing-generator runtime -------------------------------
 FROM bjj-base:latest
@@ -48,15 +55,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libvulkan1 vulkan-tools \
  && rm -rf /var/lib/apt/lists/*
 
+# s2 binary lands in build/bin/ on Linux (the ggml subproject sets
+# CMAKE_RUNTIME_OUTPUT_DIRECTORY for both itself and the parent target).
 COPY --from=s2cpp-builder /src/s2.cpp/build/bin/s2 /usr/local/bin/s2
-# GGML is shared (4 libs verified locally on 2026-04-27 against SHA e48ce8e0):
-# libggml.so, libggml-base.so, libggml-cpu.so, libggml-vulkan.so. CMake emits
-# them under build/bin/ on Linux single-config builds. If a future s2.cpp
-# revision flips to static linking, this glob will fail-loud at build and
-# the implementer should remove this line + verify with
-# `docker run --rm --entrypoint ldd <image> /usr/local/bin/s2 | grep ggml`.
-COPY --from=s2cpp-builder /src/s2.cpp/build/bin/libggml*.so /usr/local/lib/
-RUN ldconfig
+# GGML shared libs land in build/bin/ alongside s2 (libggml.so,
+# libggml-base.so, libggml-cpu.so, libggml-vulkan.so + their .0 symlinks).
+# Use `*` to catch all variants (libggml.so, libggml.so.0, etc).
+COPY --from=s2cpp-builder /src/s2.cpp/build/bin/libggml*.so* /usr/local/lib/
+RUN ldconfig \
+ && echo "=== Verifying s2 binary linkage ===" \
+ && ls -la /usr/local/bin/s2 /usr/local/lib/libggml*.so* \
+ && ldd /usr/local/bin/s2 | grep -E "ggml|not found" \
+ && /usr/local/bin/s2 --help > /dev/null && echo "s2 binary OK"
 
 COPY bjj_service_kit /app/bjj_service_kit
 COPY dubbing-generator/requirements.txt /app/requirements.txt
