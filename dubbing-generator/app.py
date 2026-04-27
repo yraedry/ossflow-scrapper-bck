@@ -93,7 +93,7 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
             or os.environ.get("DUBBING_TTS_ENGINE")
             or "elevenlabs"
         ).strip().lower()
-        if tts_engine not in ("elevenlabs", "piper", "kokoro"):
+        if tts_engine not in ("s2pro", "elevenlabs", "piper", "kokoro"):
             emit(JobEvent(type="log", data={
                 "message": f"unsupported tts_engine={tts_engine!r}, using 'elevenlabs'"
             }))
@@ -162,6 +162,24 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
             config_kwargs.setdefault("merge_max_gap_ms", 600)
             config_kwargs.setdefault("inter_phrase_crossfade_ms", 100)
             config_kwargs.setdefault("force_crossfade_ms", 250)
+        elif tts_engine == "s2pro":
+            # S2-Pro local voice clone. Same model + same ref WAV across the
+            # episode → timbre-stable across renders, so no long crossfade
+            # masks needed. merge_max_chars=300 (same as Kokoro) keeps phrases
+            # well under s2.cpp's 800-token degrade threshold while avoiding
+            # fragmentation that would inflate wall-clock time per episode
+            # (~120 s/phrase on the 2060).
+            for k in ("s2_ref_audio_path", "s2_ref_text",
+                      "s2_temperature", "s2_top_p", "s2_top_k",
+                      "s2_max_tokens"):
+                val = opts.get(k)
+                if val is not None:
+                    config_kwargs[k] = val
+            config_kwargs.setdefault("merge_max_chars", 300)
+            config_kwargs.setdefault("merge_max_gap_ms", 600)
+            config_kwargs.setdefault("inter_phrase_crossfade_ms", 100)
+            config_kwargs.setdefault("force_crossfade_ms", 250)
+            config_kwargs.setdefault("rms_jump_crossfade_ms", 0)
             config_kwargs.setdefault("rms_jump_crossfade_ms", 0)
 
         config = DubbingConfig(**config_kwargs)
@@ -206,6 +224,52 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
 
 
 app = create_app(service_name=SERVICE_NAME, task_fn=_run_dubbing_generator)
+
+
+# ======================================================================
+# S2-Pro server lifecycle
+# ======================================================================
+
+def _start_s2pro_server() -> None:
+    """Boot s2.cpp HTTP server when FastAPI starts.
+
+    Reads engine + paths from env-derived defaults (DubbingConfig). The
+    manager is a no-op if engine != 's2pro' or the binary/model is
+    missing. Returns fast — readiness is polled on a daemon thread so
+    /health stays available during GGUF mmap.
+    """
+    from dubbing_generator.config import DubbingConfig
+    from dubbing_generator.tts.s2pro_server_manager import S2ProServerManager
+
+    engine = os.environ.get("DUBBING_TTS_ENGINE", "s2pro").strip().lower()
+    cfg = DubbingConfig(tts_engine=engine)
+    manager = S2ProServerManager(cfg)
+    manager.start()
+    app.state.s2pro_manager = manager
+
+
+def _stop_s2pro_server() -> None:
+    manager = getattr(app.state, "s2pro_manager", None)
+    if manager is not None:
+        manager.stop()
+
+
+app.router.on_startup.append(_start_s2pro_server)
+app.router.on_shutdown.append(_stop_s2pro_server)
+
+
+@app.get("/s2pro/status")
+def s2pro_status() -> dict:
+    """Report whether the S2-Pro subprocess is running and ready."""
+    manager = getattr(app.state, "s2pro_manager", None)
+    if manager is None:
+        return {"running": False, "ready": False, "engine": "n/a"}
+    proc = manager.process
+    return {
+        "running": proc is not None and proc.poll() is None,
+        "ready": manager.is_ready(),
+        "engine": manager.cfg.tts_engine,
+    }
 
 
 # ======================================================================
