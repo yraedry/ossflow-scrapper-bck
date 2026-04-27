@@ -62,13 +62,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libvulkan1 vulkan-tools \
  && rm -rf /var/lib/apt/lists/*
 
-# s2 binary lands in build/bin/ on Linux (the ggml subproject sets
-# CMAKE_RUNTIME_OUTPUT_DIRECTORY for both itself and the parent target).
-COPY --from=s2cpp-builder /src/s2.cpp/build/bin/s2 /usr/local/bin/s2
-# GGML shared libs land in build/bin/ alongside s2 (libggml.so,
-# libggml-base.so, libggml-cpu.so, libggml-vulkan.so + their .0 symlinks).
-# Use `*` to catch all variants (libggml.so, libggml.so.0, etc).
-COPY --from=s2cpp-builder /src/s2.cpp/build/bin/libggml*.so* /usr/local/lib/
+# Verified actual artifact paths from successful build (LunarG SDK 1.4.313):
+#   /src/s2.cpp/build/s2                              -- the executable
+#   /src/s2.cpp/build/ggml/src/libggml{,-base,-cpu}.so.* + symlinks
+#   /src/s2.cpp/build/ggml/src/ggml-vulkan/libggml-vulkan.so.* + symlinks
+COPY --from=s2cpp-builder /src/s2.cpp/build/s2 /usr/local/bin/s2
+COPY --from=s2cpp-builder /src/s2.cpp/build/ggml/src/libggml*.so* /usr/local/lib/
+COPY --from=s2cpp-builder /src/s2.cpp/build/ggml/src/ggml-vulkan/libggml-vulkan*.so* /usr/local/lib/
 RUN ldconfig \
  && echo "=== Verifying s2 binary linkage ===" \
  && ls -la /usr/local/bin/s2 /usr/local/lib/libggml*.so* \
