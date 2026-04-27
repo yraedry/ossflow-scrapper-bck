@@ -258,7 +258,7 @@ services:
     environment:
       - OLLAMA_KEEP_ALIVE=2m
       - OLLAMA_HOST=0.0.0.0:11434
-    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    entrypoint: ["/bin/bash", "-c", "tr -d '\\r' < /entrypoint.sh | bash"]
     deploy:
       resources:
         reservations:

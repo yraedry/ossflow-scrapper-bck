@@ -965,6 +965,63 @@ async def flush_ollama() -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+@router.post("/pull-ollama-model")
+async def pull_ollama_model():
+    """Descarga el modelo Ollama configurado. Devuelve SSE con progreso en tiempo real.
+
+    Cada evento es JSON: {status, total?, completed?, pct?}
+    Evento final: {status:"success"} o {status:"error", error:"..."}
+    """
+    import httpx
+    from fastapi.responses import StreamingResponse
+
+    from api.settings import get_setting
+
+    model = get_setting("translation_model") or "qwen2.5:7b-instruct-q4_K_M"
+    base = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+
+    async def _stream():
+        try:
+            async with httpx.AsyncClient(timeout=1800.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{base}/api/pull",
+                    json={"name": model, "stream": True},
+                ) as r:
+                    if r.status_code >= 400:
+                        body = await r.aread()
+                        yield f"data: {json.dumps({'status': 'error', 'error': body.decode()[:200]})}\n\n"
+                        return
+                    async for line in r.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except Exception:
+                            continue
+                        if data.get("error"):
+                            yield f"data: {json.dumps({'status': 'error', 'error': data['error']})}\n\n"
+                            return
+                        total = data.get("total")
+                        completed = data.get("completed")
+                        event = {"status": data.get("status", "")}
+                        if total:
+                            event["total"] = total
+                        if completed:
+                            event["completed"] = completed
+                            event["pct"] = round(completed / total * 100, 1) if total else 0
+                        yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'status': 'error', 'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/eta")
 async def pipeline_eta(
     steps: str = "",

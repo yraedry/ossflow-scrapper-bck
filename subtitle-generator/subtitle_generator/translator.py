@@ -202,22 +202,36 @@ ES: "Controla el tobillo, luego rompe el grip en tu collar."
 # This avoids the classic "ES is 40% longer than EN → robotic acceleration".
 _BJJ_DUBBING_SYSTEM_PROMPT = """You adapt Brazilian Jiu-Jitsu instructional subtitles from {src_name} to {tgt_name} FOR DUBBING (voice-over).
 
-TERMINOLOGY — CRITICAL, DO NOT CONFUSE THESE WORDS:
-- "grip" = the HAND grabbing. Keep as "grip". NEVER translate to "agarre", "gancho", "enganche".
-- "hook" = a LEG hooking. Keep as "hook". NEVER translate to "gancho".
-- "underhook" / "overhook" = arm positions. Keep in English.
-- "frame" / "post" / "base" = keep in English.
+[STRUCTURAL CONSTRAINT — JSON ARRAY MAPPING]
+Input: JSON array of N strings. Output: JSON object {{"t": [...]}} with EXACTLY N strings.
+- One input string → one output string. No merging, no splitting, no dropping.
+- A very short input ("in order") must produce a very short output ("en este orden").
+- Do not borrow text from adjacent items.
+Failure to maintain 1:1 mapping breaks audio sync.
 
-Priorities in order (industry dubbing standard):
-1. PRESERVE CONTENT — every technical concept, BJJ term, instruction and explanation must survive. Losing a technique name or a step is a critical failure. If budget is tight, it is better to slightly overflow than to drop content.
-2. TARGET BUDGET — each item has a "max_chars" budget (~{cps} chars/second of {tgt_name} speech). Aim for it. Soft overflow up to ~20% is acceptable when needed to keep the full meaning; audio stretch will absorb it.
-3. NATURAL PHRASING — drop pure filler ("you know", "alright", "so", "basically"), compact verbose connectors ("vamos a hacer" → "hacemos", "es importante que" → "es clave"), but never sacrifice technical information for brevity.
+[TERMINOLOGY — DO NOT TRANSLATE THESE]
+- "camping" (BJJ) = resting body weight on opponent's frames while passing guard. Output: "camping". NEVER "acampar", "campamento", "acampada".
+- "grip" = hand grabbing fabric or wrist. Output: "grip". NEVER "agarre", "enganche".
+- "hook" = leg hooking. Output: "hook". NEVER "gancho".
+- "underhook", "overhook", "frame", "post", "base", "pass", "guard" → keep in English.
 
-Rules, non-negotiable:
-1. Keep BJJ technique names and grappling English terms in English (guard, half-guard, closed guard, open guard, butterfly guard, de la Riva, x-guard, spider guard, lasso guard, rubber guard, worm guard, knee shield, mount, side control, back mount, north-south, turtle, armbar, kimura, triangle, omoplata, heel hook, toe hold, kneebar, ankle lock, rear naked choke, guillotine, darce, anaconda, ezekiel, bow and arrow, americana, berimbolo, knee cut, knee slice, leg drag, smash pass, tripod pass, toreando, stack pass, body lock pass, sweep, bridge, shrimp, hip escape, technical stand-up, underhook, overhook, grip, frame, framing, post, base, hook, lapel, sleeve, collar, gi, no-gi, crossface, whizzer, pummel, sprawl, scramble, drill, setup, entry, transition, top, bottom, stack). Portuguese/Japanese names too (juji gatame, sankaku, ashi garami, mata leão, kesa gatame).
-2. Use informal {tgt_name} de España (castellano peninsular) as spoken by a coach. Second person singular "tú" (nunca "vos"/"usted"), vocabulario y giros de España ("coger", "vale", "fíjate", "ahora", "mira"), evita latinoamericanismos ("agarrar", "ahorita", "ustedes" por "vosotros", "pararse" por "ponerse de pie"). Imperativo peninsular ("coge", "mira", "fíjate").
-3. One input item = one output item, same order. Never merge, split, or drop items. If an item is short, keep the translation short too — do not pad to fill the budget.
-4. Output MUST be a JSON object: {{"t": ["adapted item 1", ...]}} with the same number of items as the input, in the same order.
+[PRIORITIES]
+1. Preserve 1:1 array mapping (see structural constraint above).
+2. Preserve all technical content — BJJ terms, instructions, steps.
+3. Fit within `max_chars` budget per item. Soft overflow ≤20% accepted.
+4. Compact connectors and drop pure filler, but never at the cost of technical information.
+
+[LANGUAGE REGISTER]
+Castellano peninsular de España, register of a BJJ coach.
+- Second person: "tú" — imperativo "coge", "mira", "fíjate", "pon".
+- FORBIDDEN: "ustedes" (use "vosotros"), "agarrar" (use "coger"), "ahorita", "pararse" (use "ponerse de pie").
+- Use: "vale", "venga", "fíjate", "mira", "ahora".
+
+[BJJ TERMS — KEEP IN ENGLISH]
+camping, outside camping, inside camping, guard, half-guard, closed guard, open guard, butterfly guard, de la Riva, x-guard, spider guard, lasso guard, rubber guard, worm guard, knee shield, mount, side control, back mount, north-south, turtle, armbar, kimura, triangle, omoplata, heel hook, toe hold, kneebar, ankle lock, rear naked choke, guillotine, darce, anaconda, ezekiel, bow and arrow, americana, berimbolo, knee cut, knee slice, leg drag, smash pass, tripod pass, toreando, stack pass, body lock pass, sweep, bridge, shrimp, hip escape, technical stand-up, underhook, overhook, grip, frame, framing, post, base, hook, lapel, sleeve, collar, gi, no-gi, crossface, whizzer, pummel, sprawl, scramble, drill, setup, entry, transition, top, bottom, stack. Also Portuguese/Japanese: juji gatame, sankaku, ashi garami, mata leão, kesa gatame.
+
+[OUTPUT FORMAT]
+Return ONLY valid JSON: {{"t": ["item 1", "item 2", ...]}} — same count as input, same order.
 
 EXAMPLES:
 EN: "Get your grip on the sleeve first."
@@ -228,6 +242,12 @@ ES: "Usa el butterfly hook para barrerlo."
 
 EN: "Underhook deep, then frame on his hip."
 ES: "Underhook profundo, luego frame en su cadera."
+
+EN: "So we do outside camping"
+ES: "Así que hacemos outside camping"
+
+EN: "in order"
+ES: "en este orden"
 """
 
 
@@ -237,54 +257,37 @@ ES: "Underhook profundo, luego frame en su cadera."
 # finishes early and leaves audible silence in the middle of the speech.
 _BJJ_DUBBING_FILL_SYSTEM_PROMPT = """You adapt Brazilian Jiu-Jitsu instructional subtitles from {src_name} to {tgt_name} FOR DUBBING (voice-over).
 
-This adaptation is time-bound: each item represents a real stretch of
-speaker talk time. The TTS engine speaks at a constant rate, so the
-number of characters you output directly determines how long the TTS
-audio will be. If you write too few characters, the dubbed track will
-have silence in the middle of the speaker's speech — the worst failure
-mode for a dubbing.
+[STRUCTURAL CONSTRAINT — JSON ARRAY MAPPING]
+Input: JSON array of N strings. Output: JSON object {{"t": [...]}} with EXACTLY N strings.
+- One input string → one output string. No merging, no splitting, no dropping.
+- A very short input ("in order") must produce a very short output ("en este orden").
+Failure to maintain 1:1 mapping breaks audio sync.
 
-Priorities in order:
-1. FILL THE SLOT — target 95-108% of `target_chars`. Undershooting
-   leaves audible silence in the middle of the speaker's continuous
-   speech (WORST failure mode for dubbing). A slight overshoot is
-   absorbed by gentle audio stretch without perceptible artifacts.
-2. HARD CEILING 110% — do NOT exceed 110% of target_chars; beyond
-   that TTS must speed up too aggressively and accents turn robotic.
-3. PRESERVE CONTENT — every technical concept, BJJ term, step and
-   explanation must survive. Do not invent new technical content. If
-   the literal translation is below 90%, add a short natural
-   connective ("fíjate bien", "en este caso", "la idea es",
-   "básicamente", "como ves", "observa cómo", "de esta forma") to
-   reach the target range. Do NOT pad aggressively or duplicate ideas.
-3. NATURAL PHRASING — coach register, second person singular ("tú"),
-   informal {tgt_name} de España (castellano peninsular). Vocabulario y
-   giros de España ("vale", "coger", "fíjate", "mira", "ahora"), evita
-   latinoamericanismos ("agarrar", "ustedes" por "vosotros", "ahorita").
-   Avoid filler that sounds robotic; prefer genuine discourse markers that
-   a real Spanish dub actor would say.
+[TIME BUDGET CONSTRAINT]
+Each item has a `target_chars` value representing real speaker talk time.
+The TTS engine speaks at a fixed rate — character count = audio duration.
+- Target: 95–108% of `target_chars`.
+- Undershoot (< 95%) = silence gap in the middle of speech (worst failure).
+- Hard ceiling: do not exceed 110% (TTS would speed up and sound robotic).
+- If the literal translation is short, add natural connective phrases: "fíjate bien", "en este caso", "la idea es", "como ves", "de esta forma", "observa cómo". Do not invent technical content.
 
-TERMINOLOGY — CRITICAL, DO NOT CONFUSE:
-- "grip" = HAND grab → keep as "grip", NEVER "agarre"/"gancho".
-- "hook" = LEG hook → keep as "hook", NEVER "gancho".
-- "underhook"/"overhook"/"frame"/"post"/"base" → keep in English.
+[TERMINOLOGY — DO NOT TRANSLATE THESE]
+- "camping" (BJJ) = resting body weight on opponent's frames while passing guard. Output: "camping". NEVER "acampar", "campamento".
+- "grip" = hand grabbing. Output: "grip". NEVER "agarre", "enganche".
+- "hook" = leg hooking. Output: "hook". NEVER "gancho".
+- "underhook", "overhook", "frame", "post", "base" → keep in English.
 
-Rules, non-negotiable:
-1. Keep BJJ technique names and grappling English terms in English
-   (guard, half-guard, closed/open/butterfly/x/de la Riva guard,
-   armbar, kimura, triangle, omoplata, heel hook, toe hold, kneebar,
-   rear naked choke, guillotine, darce, anaconda, ezekiel, bow and arrow,
-   sweep, pass, underhook, overhook, grip, frame, base, hook, lapel,
-   sleeve, collar, mount, side control, back mount, north-south, turtle,
-   knee cut, knee slice, smash pass, leg drag, toreando, berimbolo,
-   tripod pass, stack pass, body lock pass, crossface, whizzer, tap,
-   pummel, sprawl, scramble, drill, setup, entry, transition, top,
-   bottom, pressure, stack). Portuguese/Japanese names stay too
-   (juji gatame, sankaku, ashi garami, mata leão, kesa gatame).
-2. One input item = one output item, same order. Never merge, split, or
-   drop items.
-3. Output MUST be a JSON object: {{"t": ["adapted item 1", ...]}} with
-   the same number of items as the input, in the same order.
+[LANGUAGE REGISTER]
+Castellano peninsular de España, register of a BJJ coach.
+- Second person: "tú" — imperativo "coge", "mira", "fíjate", "pon".
+- FORBIDDEN: "ustedes" (use "vosotros"), "agarrar" (use "coger"), "ahorita", "pararse" (use "ponerse de pie").
+- Use: "vale", "venga", "fíjate", "mira", "ahora".
+
+[BJJ TERMS — KEEP IN ENGLISH]
+camping, outside camping, inside camping, guard, half-guard, closed guard, open guard, butterfly guard, de la Riva, x-guard, spider guard, lasso guard, rubber guard, worm guard, knee shield, mount, side control, back mount, north-south, turtle, armbar, kimura, triangle, omoplata, heel hook, toe hold, kneebar, rear naked choke, guillotine, darce, anaconda, ezekiel, bow and arrow, sweep, pass, underhook, overhook, grip, frame, base, hook, lapel, sleeve, collar, mount, knee cut, knee slice, smash pass, leg drag, toreando, berimbolo, tripod pass, stack pass, body lock pass, crossface, whizzer, tap, pummel, sprawl, scramble, drill, setup, entry, transition, top, bottom, pressure, stack. Also: juji gatame, sankaku, ashi garami, mata leão, kesa gatame.
+
+[OUTPUT FORMAT]
+Return ONLY valid JSON: {{"t": ["item 1", "item 2", ...]}} — same count as input, same order.
 
 EXAMPLES:
 EN: "Get your grip on the sleeve first."
@@ -292,6 +295,12 @@ ES: "Coge el grip en la manga primero, fíjate."
 
 EN: "Use the butterfly hook to sweep."
 ES: "Usa el butterfly hook para hacer el sweep."
+
+EN: "So we do outside camping"
+ES: "Así que hacemos outside camping"
+
+EN: "in order"
+ES: "en este orden"
 """
 
 
@@ -341,6 +350,15 @@ class _BaseChatTranslator(_BaseTranslator, abc.ABC):
     def _extract_message_content(self, resp_json: dict[str, Any]) -> str:
         """Pull the assistant message text out of a parsed provider response."""
         ...
+
+    def _do_post(self, body: dict, headers: dict) -> httpx.Response:
+        """POST to the provider endpoint. Subclasses may override (e.g. auto-pull)."""
+        return _post_with_retry(
+            self._endpoint_url(),
+            headers=headers,
+            json_body=body,
+            provider_label=self.provider_label,
+        )
 
     # ---- Optional hook (default to module-level timeout) ----
     def _request_timeout(self) -> float:
@@ -393,7 +411,7 @@ class _BaseChatTranslator(_BaseTranslator, abc.ABC):
         # Fill-budget prompt is stricter (per-item targets, upper/lower bounds)
         # and the model occasionally merges/splits items when the batch is
         # large. Smaller batches give cleaner 1:1 counts.
-        batch_size = 15 if fill_budget else self._BATCH_SIZE
+        batch_size = min(15, self._BATCH_SIZE) if fill_budget else self._BATCH_SIZE
         out: list[str] = []
         for chunk in _chunks(items, batch_size):
             try:
@@ -429,12 +447,7 @@ class _BaseChatTranslator(_BaseTranslator, abc.ABC):
 
         last_err: Exception | None = None
         for attempt in range(1 + self._MAX_RETRIES):
-            r = _post_with_retry(
-                self._endpoint_url(),
-                headers=headers,
-                json_body=body,
-                provider_label=self.provider_label,
-            )
+            r = self._do_post(body, headers)
             if r.status_code >= 400:
                 raise RuntimeError(
                     f"{self.provider_label} error {r.status_code}: {r.text[:300]}"
@@ -453,7 +466,33 @@ class _BaseChatTranslator(_BaseTranslator, abc.ABC):
             if not isinstance(items, list):
                 items = parsed.get("items")
             if isinstance(items, list) and len(items) == len(texts):
-                return [str(x) for x in items]
+                translated = [_coerce_to_str(x) for x in items]
+                foreign_idx = _foreign_script_indices(translated)
+                if foreign_idx and attempt < self._MAX_RETRIES:
+                    log.warning(
+                        "Foreign script in %d items, retrying batch", len(foreign_idx),
+                    )
+                    body["messages"].append(
+                        {"role": "assistant", "content": json.dumps({"t": translated}, ensure_ascii=False)},
+                    )
+                    body["messages"].append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Some items contain non-Spanish characters. "
+                                "Translate ALL items into Spanish (castellano peninsular) only. "
+                                'Return JSON {"t": [...]} with the same number of items.\n'
+                                "Offenders: "
+                                + json.dumps(
+                                    [{"index": i, "current": translated[i], "source": texts[i]} for i in foreign_idx],
+                                    ensure_ascii=False,
+                                )
+                            ),
+                        },
+                    )
+                    last_err = RuntimeError(f"Foreign script in items {foreign_idx}")
+                    continue
+                return translated
 
             last_err = RuntimeError(
                 f"{self.provider_label} returned {len(items) if isinstance(items, list) else 'non-list'} items, "
@@ -523,12 +562,7 @@ class _BaseChatTranslator(_BaseTranslator, abc.ABC):
 
         last_err: Exception | None = None
         for attempt in range(1 + self._MAX_RETRIES):
-            r = _post_with_retry(
-                self._endpoint_url(),
-                headers=headers,
-                json_body=body,
-                provider_label=self.provider_label,
-            )
+            r = self._do_post(body, headers)
             if r.status_code >= 400:
                 raise RuntimeError(
                     f"{self.provider_label} error {r.status_code}: {r.text[:300]}"
@@ -573,7 +607,41 @@ class _BaseChatTranslator(_BaseTranslator, abc.ABC):
                 )
                 continue
 
-            result = [str(x) for x in result]
+            result = [_coerce_to_str(x) for x in result]
+
+            # Detect items where the model mixed in non-Latin script (e.g. Chinese).
+            # Treat them like budget offenders: request a targeted retry.
+            foreign_idx = _foreign_script_indices(result)
+            if foreign_idx and attempt < self._MAX_RETRIES:
+                log.warning(
+                    "Foreign script detected in %d items (indices %s); requesting retranslation",
+                    len(foreign_idx), foreign_idx,
+                )
+                foreign_feedback = [
+                    {
+                        "index": i,
+                        "problem": "contains non-Spanish characters (e.g. Chinese/Arabic/Cyrillic) — retranslate into Spanish only",
+                        "current": result[i],
+                        "source": payload_items[i]["text"],
+                    }
+                    for i in foreign_idx
+                ]
+                body["messages"].append(
+                    {"role": "assistant", "content": json.dumps({"t": result}, ensure_ascii=False)},
+                )
+                body["messages"].append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Some items contain non-Spanish characters. "
+                            "Rewrite ALL items in Spanish only (castellano peninsular). "
+                            'Return JSON {"t": [...]} with the same number of items.\n'
+                            "Offending items: "
+                            + json.dumps(foreign_feedback, ensure_ascii=False)
+                        ),
+                    },
+                )
+                continue
 
             budgets = [p[budget_key] for p in payload_items]
             # Upper bound: fill_budget allows +10% overshoot (TTS stretch
@@ -710,6 +778,9 @@ class OpenAITranslator(_BaseChatTranslator):
 class OllamaTranslator(_BaseChatTranslator):
     """Translate via Ollama native /api/chat with strict JSON mode."""
 
+    # Qwen2.5-7b loses item count on large batches — keep small for reliable 1:1 mapping
+    _BATCH_SIZE = 8
+
     def __init__(
         self,
         model: str = "qwen2.5:7b-instruct-q4_K_M",
@@ -746,6 +817,50 @@ class OllamaTranslator(_BaseChatTranslator):
     def _extract_message_content(self, resp_json: dict[str, Any]) -> str:
         return resp_json["message"]["content"]
 
+    def _ensure_model(self) -> None:
+        """Pull the model if Ollama returns 404. Uses stream=True to survive CDN retries."""
+        pull_url = f"{self.base_url}/api/pull"
+        log.info("Ollama model '%s' not found — pulling now (may take several minutes)…", self.model)
+        with httpx.Client(timeout=1800.0) as client:
+            with client.stream("POST", pull_url, json={"name": self.model, "stream": True}) as resp:
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"Ollama pull failed ({resp.status_code}): {resp.read().decode()[:200]}")
+                last_status = ""
+                for line in resp.iter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        last_status = data.get("status", last_status)
+                        if data.get("error"):
+                            raise RuntimeError(f"Ollama pull error: {data['error']}")
+                    except (json.JSONDecodeError, RuntimeError):
+                        raise
+                    except Exception:
+                        pass
+        if last_status != "success":
+            raise RuntimeError(f"Ollama pull ended with status: {last_status!r}")
+        log.info("Ollama pull complete for '%s'", self.model)
+
+    def _do_post(self, body: dict, headers: dict) -> httpx.Response:
+        """POST to Ollama; if 404 pull the model and retry once."""
+        r = _post_with_retry(
+            self._endpoint_url(),
+            headers=headers,
+            json_body=body,
+            provider_label=self.provider_label,
+        )
+        if r.status_code == 404:
+            self._ensure_model()
+            r = _post_with_retry(
+                self._endpoint_url(),
+                headers=headers,
+                json_body=body,
+                provider_label=self.provider_label,
+            )
+        return r
+
 
 # ---------------------------------------------------------------------------
 # Factory
@@ -776,6 +891,47 @@ def make_translator(
             target_lang=target_lang,
         )
     raise ValueError(f"Unknown translation provider: {provider!r}")
+
+
+_FOREIGN_SCRIPT_RE = re.compile(
+    r"[Ѐ-ӿ"   # Cyrillic
+    r"؀-ۿ"   # Arabic
+    r"ऀ-ॿ"   # Devanagari
+    r"一-鿿"   # CJK Unified (Chinese/Japanese kanji)
+    r"぀-ゟ"   # Hiragana
+    r"゠-ヿ"   # Katakana
+    r"가-힯"   # Korean
+    r"]"
+)
+
+
+def _foreign_script_indices(items: list[str]) -> list[int]:
+    """Return indices of items that contain non-Latin/non-Spanish script characters."""
+    return [i for i, txt in enumerate(items) if _FOREIGN_SCRIPT_RE.search(txt)]
+
+
+def _coerce_to_str(x: Any) -> str:
+    """Extract a plain string from whatever the LLM returned in a translation slot.
+
+    The model occasionally echoes back the input payload structure instead of
+    a plain string.  Handle the common shapes gracefully before falling back
+    to str().
+    """
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        # {"t": "..."} or {"text": "..."} — take whichever is present
+        for key in ("t", "text", "translated"):
+            if key in x and isinstance(x[key], str):
+                return x[key]
+        # Any string value as last resort
+        for v in x.values():
+            if isinstance(v, str):
+                return v
+    if isinstance(x, list) and x and isinstance(x[0], str):
+        # ["translated text", "49"] — first element is the translation
+        return x[0]
+    return str(x)
 
 
 def _chunks(items: list[str], size: int) -> Iterable[list[str]]:

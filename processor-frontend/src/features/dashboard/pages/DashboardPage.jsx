@@ -96,10 +96,10 @@ export default function DashboardPage() {
       </motion.header>
 
       <div className="grid auto-rows-[120px] grid-cols-12 gap-4">
-        <Cell index={0} className="col-span-12 row-span-2 lg:col-span-4">
+        <Cell index={0} className="col-span-12 row-span-3 lg:col-span-4">
           <HealthCard className="h-full" />
         </Cell>
-        <Cell index={1} className="col-span-12 row-span-2 lg:col-span-8">
+        <Cell index={1} className="col-span-12 row-span-3 lg:col-span-8">
           <GpuPanel className="h-full" />
         </Cell>
         <Cell index={2} className="col-span-12 row-span-2 lg:col-span-6">

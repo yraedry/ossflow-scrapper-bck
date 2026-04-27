@@ -94,7 +94,6 @@ const mountSchema = z.object({
 })
 
 const processingSchema = z.object({
-  voice_profile_default: z.string().optional().nullable(),
   output_dir: z.string().optional(),
   source_lang: z.string().min(2).max(8).default('en'),
   target_lang: z.string().min(2).max(8).default('es'),
@@ -502,7 +501,6 @@ function ProcessingSection({ settings }) {
   const form = useForm({
     resolver: zodResolver(processingSchema),
     defaultValues: {
-      voice_profile_default: settings?.voice_profile_default || '',
       output_dir: defaults.output_dir || '',
       source_lang: defaults.source_lang || 'en',
       target_lang: defaults.target_lang || 'es',
@@ -512,7 +510,6 @@ function ProcessingSection({ settings }) {
   const onSubmit = async (values) => {
     try {
       const payload = {
-        voice_profile_default: values.voice_profile_default || null,
         processing_defaults: {
           ...defaults,
           output_dir: values.output_dir || undefined,
@@ -542,16 +539,6 @@ function ProcessingSection({ settings }) {
           <CardDescription>Valores por defecto para nuevos pipelines.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div>
-            <Label htmlFor="voice_profile_default">Perfil de voz por defecto</Label>
-            <Input
-              id="voice_profile_default"
-              placeholder="(ninguno)"
-              {...form.register('voice_profile_default')}
-              className="mt-1.5"
-            />
-          </div>
-
           <div>
             <Label htmlFor="output_dir">Directorio de salida (opcional)</Label>
             <Input
@@ -745,10 +732,16 @@ function OracleSection({ settings }) {
   const form = useForm({
     resolver: zodResolver(oracleSchema),
     defaultValues: {
-      provider_default: defaults.oracle_provider_default || (providers[0]?.id ?? ''),
+      provider_default: defaults.oracle_provider_default || '',
       timeout_seconds: defaults.oracle_timeout_seconds || 30,
     },
   })
+
+  useEffect(() => {
+    if (providers.length > 0 && !form.getValues('provider_default')) {
+      form.setValue('provider_default', defaults.oracle_provider_default || providers[0].id)
+    }
+  }, [providers])
 
   const onSubmit = async (values) => {
     try {
@@ -1395,6 +1388,9 @@ function MaintenanceSection() {
   const libraryPath = settings?.library_path || ''
   const [busy, setBusy] = useState(false)
   const [restarting, setRestarting] = useState(false)
+  const [pulling, setPulling] = useState(false)
+  const [pullPct, setPullPct] = useState(null)
+  const [pullStatus, setPullStatus] = useState('')
 
   const clearLocks = async () => {
     setBusy(true)
@@ -1410,6 +1406,50 @@ function MaintenanceSection() {
       toast.error('Falló la limpieza', { description: e?.message || 'Error' })
     } finally {
       setBusy(false)
+    }
+  }
+
+  const pullOllamaModel = async () => {
+    setPulling(true)
+    setPullPct(0)
+    setPullStatus('Conectando…')
+    const model = settings?.translation_model || 'qwen2.5:7b-instruct-q4_K_M'
+    try {
+      const resp = await fetch(`/api/pipeline/pull-ollama-model`, { method: 'POST' })
+      if (!resp.ok) { toast.error('Error al iniciar descarga'); return }
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop()
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const data = JSON.parse(line.slice(6))
+            if (data.status === 'error') {
+              toast.error('Error descargando', { description: data.error })
+              return
+            }
+            if (data.status === 'success') {
+              setPullPct(100)
+              setPullStatus('¡Descarga completa!')
+              toast.success('Modelo descargado', { description: model })
+              return
+            }
+            if (data.pct != null) setPullPct(data.pct)
+            if (data.status) setPullStatus(data.status)
+          } catch { /* ignore malformed */ }
+        }
+      }
+    } catch (e) {
+      toast.error('Error al descargar', { description: e?.message || 'Error' })
+    } finally {
+      setPulling(false)
+      setTimeout(() => { setPullPct(null); setPullStatus('') }, 3000)
     }
   }
 
@@ -1443,6 +1483,30 @@ function MaintenanceSection() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="rounded-md border border-border/60 p-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">Descargar modelo Ollama</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Descarga el modelo configurado en Traducción ({settings?.translation_model || 'qwen2.5:7b-instruct-q4_K_M'}) si no está presente.
+                  Necesario antes del primer pipeline con Ollama. Tarda varios minutos (~4.5 GB).
+                </p>
+              </div>
+              <Button onClick={pullOllamaModel} disabled={pulling} variant="outline" size="sm" className="shrink-0">
+                {pulling ? <Loader2 className="mr-2 animate-spin" size={14} /> : <Download className="mr-2" size={14} />}
+                {pulling ? 'Descargando…' : 'Descargar'}
+              </Button>
+            </div>
+            {pullPct != null && (
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span className="truncate">{pullStatus}</span>
+                  <span className="shrink-0 ml-2">{pullPct.toFixed(1)}%</span>
+                </div>
+                <Progress value={pullPct} className="h-1.5" />
+              </div>
+            )}
+          </div>
           <div className="flex items-start justify-between gap-4 rounded-md border border-border/60 p-4">
             <div className="min-w-0">
               <p className="text-sm font-medium">Liberar VRAM (reiniciar Subtitle Generator)</p>

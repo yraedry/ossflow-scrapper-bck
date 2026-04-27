@@ -344,7 +344,7 @@ export default function VoicesPage() {
             Perfiles de voz
           </h1>
           <p className="text-sm text-muted-foreground">
-            Muestras para el doblaje con clonación de voz (Coqui XTTS).
+            Muestras de audio para clonación de voz del instructor.
           </p>
         </div>
         <Button onClick={() => setDialogOpen(true)} className="gap-1">

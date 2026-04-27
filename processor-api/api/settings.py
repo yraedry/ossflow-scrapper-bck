@@ -189,9 +189,22 @@ def get_setting(key: str) -> Any:
 # Routes (API contract unchanged)
 # ---------------------------------------------------------------------------
 
+_SECRET_KEYS = {"openai_api_key", "telegram_api_hash", "elevenlabs_api_key", "deepl_api_key"}
+
+
+def _mask_secrets(data: dict[str, Any]) -> dict[str, Any]:
+    out = {}
+    for k, v in data.items():
+        if k in _SECRET_KEYS or k.endswith("_api_key"):
+            out[k] = "***" if v else None
+        else:
+            out[k] = v
+    return out
+
+
 @router.get("")
 async def get_settings():
-    return load_settings()
+    return _mask_secrets(load_settings())
 
 
 @router.put("")
@@ -249,7 +262,8 @@ async def put_settings(request: Request):
         ok = body["openai_api_key"]
         if ok is not None and not isinstance(ok, str):
             return JSONResponse({"error": "openai_api_key must be a string or null"}, status_code=422)
-        current["openai_api_key"] = ok.strip() if isinstance(ok, str) else ok
+        if ok != "***":  # sentinel from masked GET response — ignore
+            current["openai_api_key"] = ok.strip() if isinstance(ok, str) else ok
 
     if "translation_provider" in body:
         val = body["translation_provider"]

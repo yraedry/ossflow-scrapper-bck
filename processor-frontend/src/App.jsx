@@ -9,7 +9,6 @@ import PipelineDetailPage from './features/pipeline/pages/PipelineDetailPage'
 import ElevenLabsPage from './features/elevenlabs/pages/ElevenLabsPage'
 import SearchPage from './features/search/pages/SearchPage'
 import LogsPage from './features/logs/pages/LogsPage'
-import VoicesPage from './features/voices/pages/VoicesPage'
 import TelegramPage from './features/telegram/pages/TelegramPage'
 import SettingsPage from './features/settings/pages/SettingsPage'
 import NotFound from './components/NotFound'
@@ -35,7 +34,6 @@ const router = createBrowserRouter([
       { path: '/elevenlabs', element: <ElevenLabsPage /> },
       { path: '/search', element: <SearchPage /> },
       { path: '/logs', element: <LogsPage /> },
-      { path: '/voices', element: <VoicesPage /> },
       { path: '/telegram', element: <TelegramPage /> },
       { path: '/settings', element: <SettingsPage /> },
       { path: '*', element: <NotFound /> },

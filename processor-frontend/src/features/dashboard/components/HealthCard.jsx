@@ -52,7 +52,7 @@ export function HealthCard({ className }) {
                 />
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium">{b.label}</div>
-                  <div className={cn('text-[10px] uppercase', tone.text)}>{tone.label}</div>
+                  <div className={cn('text-[10px]', tone.text)}>{tone.label}</div>
                 </div>
               </div>
               <div className="text-right text-[10px] text-muted-foreground">
