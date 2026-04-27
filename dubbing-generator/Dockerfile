@@ -1,48 +1,51 @@
 # syntax=docker/dockerfile:1.7
 # Build context: ../python
 
-# ----- Stage 1: s2.cpp Vulkan builder -----------------------------------
-# Stay on Ubuntu 22.04 (GLIBC 2.35 — matches bjj-base CUDA 12.4 runtime),
-# but pull modern Vulkan SDK from the LunarG apt repo. Ubuntu 22.04's
-# distro libvulkan-dev is 1.3.204 (Dec 2021) which is too old: it lacks
-# enum members like `eMesaDozen` and conversion operators that current
-# ggml-vulkan.cpp depends on. LunarG ships 1.4.x against the same base
-# OS so we keep GLIBC compatibility AND get headers that compile.
-FROM ubuntu:22.04 AS s2cpp-builder
+# ----- Stage 1: s2.cpp CUDA builder -------------------------------------
+# Uses NVIDIA's CUDA 12.4 devel image on Ubuntu 22.04 (GLIBC 2.35 — matches
+# bjj-base CUDA 12.4 runtime so the binary loads cleanly in the runtime
+# stage).
+#
+# Why CUDA and not Vulkan: Docker Desktop on Windows/WSL2 does NOT inject
+# the NVIDIA Vulkan ICD into containers (only CUDA passes through), so a
+# Vulkan-built s2 crashes with `vk::IncompatibleDriverError` in WSL2-hosted
+# dev. CUDA gives us dev/prod parity (workstation WSL2 + Proxmox LXC
+# server both use CUDA), keeps all-in on NVIDIA tooling, and avoids the
+# `graphics` capability dance that nvidia-container-toolkit doesn't fully
+# honor on Docker Desktop.
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS s2cpp-builder
 ARG S2CPP_REPO=https://github.com/rodrigomatta/s2.cpp
 ARG S2CPP_REF=e48ce8e02d8335bd9a0ba94679f605724b31d123
-ARG VULKAN_SDK_VERSION=1.4.313
+# Compute capability for Turing (RTX 2070S workstation, RTX 2060 server).
+# Both are sm_75. Adding sm_86 would also cover Ampere if you later move
+# to a 3060/3090, but it doubles compile time.
+ARG CUDA_ARCHITECTURES=75
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git ca-certificates pkg-config \
-        wget gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
-# LunarG Vulkan SDK (modern Vulkan-Headers + Vulkan-Hpp + glslc + spirv).
-# URL form: https://packages.lunarg.com/vulkan/<VER>/lunarg-vulkan-<VER>-jammy.list
-# (versioned variants pin a specific SDK release; the unversioned
-# `lunarg-vulkan-jammy.list` always points to latest, which we avoid
-# for build reproducibility).
-RUN wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
-        | gpg --dearmor -o /etc/apt/trusted.gpg.d/lunarg.gpg \
- && wget -qO /etc/apt/sources.list.d/lunarg-vulkan.list \
-        https://packages.lunarg.com/vulkan/${VULKAN_SDK_VERSION}/lunarg-vulkan-${VULKAN_SDK_VERSION}-jammy.list \
- && apt-get update && apt-get install -y --no-install-recommends vulkan-sdk \
- && rm -rf /var/lib/apt/lists/* \
- && echo "=== Vulkan SDK installed ===" \
- && dpkg -l | grep -E "vulkan|spirv|glslang" \
- && echo "=== Vulkan-Headers version ===" \
- && grep -E "VK_HEADER_VERSION|VK_HEADER_VERSION_COMPLETE" /usr/include/vulkan/vulkan_core.h | head -5 \
- && echo "=== eMesaDozen present? ===" \
- && grep -c "eMesaDozen" /usr/include/vulkan/vulkan_enums.hpp || true
+ && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --recurse-submodules ${S2CPP_REPO} /src/s2.cpp \
  && cd /src/s2.cpp && git checkout ${S2CPP_REF} \
  && git submodule update --init --recursive
 
 WORKDIR /src/s2.cpp
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DS2_VULKAN=ON \
+# libcuda.so.1 (CUDA driver API) lives in the NVIDIA driver injected at
+# runtime by nvidia-container-toolkit, not in the cuda-devel image. The
+# devel image ships a link-time stub at /usr/local/cuda/lib64/stubs/
+# named `libcuda.so` (no .1 suffix). When `s2` is linked, ld follows the
+# transitive NEEDED `libcuda.so.1` from libggml-cuda.so and fails because
+# that exact filename doesn't exist in the stubs dir. Symlink the .1
+# alias so the linker resolves the SONAME during build; the real
+# libcuda.so.1 from the driver overrides at runtime.
+RUN ln -sf libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
+RUN cmake -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DS2_CUDA=ON \
+        -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} \
+        -DCMAKE_EXE_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
+        -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/local/cuda/lib64/stubs -Wl,-rpath-link,/usr/local/cuda/lib64/stubs" \
  && cmake --build build --parallel "$(nproc)" \
  && echo "=== Build artifacts ===" \
  && find /src/s2.cpp/build -maxdepth 4 -name "s2" -type f -executable -exec ls -la {} + \
@@ -51,29 +54,31 @@ RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DS2_VULKAN=ON \
 # ----- Stage 2: dubbing-generator runtime -------------------------------
 FROM bjj-base:latest
 
-# Vulkan loader only. The NVIDIA driver (passed via nvidia-container-toolkit
-# with NVIDIA_DRIVER_CAPABILITIES=graphics,...) supplies its own ICD JSON.
-# DO NOT install mesa-vulkan-drivers — it can preempt the NVIDIA ICD and
-# force a CPU fallback that hangs synthesis silently.
+# CUDA runtime libs come from bjj-base (which is built on
+# nvidia/cuda:12.4-runtime). No Vulkan, no extra graphics tooling needed.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
         rubberband-cli wget espeak-ng \
-        libvulkan1 vulkan-tools \
  && rm -rf /var/lib/apt/lists/*
 
-# Verified actual artifact paths from successful build (LunarG SDK 1.4.313):
+# Verified actual artifact paths from successful build:
 #   /src/s2.cpp/build/s2                              -- the executable
 #   /src/s2.cpp/build/ggml/src/libggml{,-base,-cpu}.so.* + symlinks
-#   /src/s2.cpp/build/ggml/src/ggml-vulkan/libggml-vulkan.so.* + symlinks
+#   /src/s2.cpp/build/ggml/src/ggml-cuda/libggml-cuda.so.* + symlinks
 COPY --from=s2cpp-builder /src/s2.cpp/build/s2 /usr/local/bin/s2
 COPY --from=s2cpp-builder /src/s2.cpp/build/ggml/src/libggml*.so* /usr/local/lib/
-COPY --from=s2cpp-builder /src/s2.cpp/build/ggml/src/ggml-vulkan/libggml-vulkan*.so* /usr/local/lib/
+COPY --from=s2cpp-builder /src/s2.cpp/build/ggml/src/ggml-cuda/libggml-cuda*.so* /usr/local/lib/
 RUN ldconfig \
  && echo "=== Verifying s2 binary linkage ===" \
  && ls -la /usr/local/bin/s2 /usr/local/lib/libggml*.so* \
- && ldd /usr/local/bin/s2 | grep -E "ggml|not found" \
- && /usr/local/bin/s2 --help > /dev/null && echo "s2 binary OK"
+ && ldd /usr/local/bin/s2 | grep -E "ggml|cuda" || true
+# Note: `libcuda.so.1 => not found` in `ldd` output during build is
+# EXPECTED — that lib comes from the NVIDIA driver injected by
+# nvidia-container-toolkit at runtime. We cannot run `s2 --help` in
+# build to smoke-test because `bjj-base` doesn't ship the driver stub
+# in the runtime path. Runtime verification happens via the FastAPI
+# startup hook (which logs s2.cpp stdout).
 
 COPY bjj_service_kit /app/bjj_service_kit
 COPY dubbing-generator/requirements.txt /app/requirements.txt

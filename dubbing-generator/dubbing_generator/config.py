@@ -183,12 +183,17 @@ class DubbingConfig:
     kokoro_speed: float = 1.0
 
     # ------------------------------------------------------------------
-    # Fish Audio S2-Pro (local Vulkan voice-clone TTS)
+    # Fish Audio S2-Pro (local CUDA voice-clone TTS)
     # ------------------------------------------------------------------
     # s2.cpp inference engine running as HTTP server inside the container.
     # The server is booted at FastAPI startup (s2pro_server_manager) and
     # stays resident — model load takes ~10 s and we don't want to pay it
     # per phrase.
+    #
+    # Backend: CUDA (no Vulkan). Vulkan was discarded because Docker
+    # Desktop on Windows/WSL2 doesn't expose the NVIDIA Vulkan ICD into
+    # containers — only CUDA passes through. CUDA also gives us
+    # dev/prod parity (workstation WSL2 + LXC Proxmox both use CUDA).
     #
     # IMPORTANT: ``s2_ref_text`` MUST match what the speaker says in the
     # ``s2_ref_audio_path`` WAV exactly. Drift between the two collapses
@@ -217,7 +222,7 @@ class DubbingConfig:
     # Server boot health timeout. GGUF mmap from NFS-backed /models/s2pro
     # can take 20+ s on cold cache; 60 s is generous.
     s2_health_timeout_s: float = 60.0
-    s2_vulkan_device: int = 0
+    s2_cuda_device: int = 0
 
     # ------------------------------------------------------------------
     # Voice cloning
