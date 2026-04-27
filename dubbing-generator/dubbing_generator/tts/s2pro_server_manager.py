@@ -66,6 +66,15 @@ class S2ProServerManager:
         return self._ready.wait(timeout=timeout)
 
     def start(self) -> None:
+        # Idempotent: in batch jobs (process_directory) start() is called
+        # per episode but we want to share the running server across all
+        # episodes — booting once amortizes the ~10s GGUF mmap. If the
+        # process is alive, just return; the readiness Event still
+        # holds from the original start.
+        if self._process is not None and self._process.poll() is None:
+            logger.debug("S2-Pro server already running (pid=%s)",
+                         self._process.pid)
+            return
         if self.cfg.tts_engine != "s2pro":
             logger.debug("S2-Pro server skipped (engine=%s)",
                          self.cfg.tts_engine)

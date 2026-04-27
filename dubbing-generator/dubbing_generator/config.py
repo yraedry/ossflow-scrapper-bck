@@ -1,6 +1,14 @@
 """Centralized configuration for the dubbing generator."""
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
+
+
+def _env(name: str, default: str) -> str:
+    """Read env var, treating empty string as 'use default' (compose passes
+    through `${VAR:-}` so the key is always present, often empty)."""
+    val = os.environ.get(name) or ""
+    return val if val else default
 
 
 @dataclass
@@ -201,8 +209,15 @@ class DubbingConfig:
     # pairs). If you swap the ref WAV, swap this string too.
     s2_server_host: str = "127.0.0.1"
     s2_server_port: int = 3030
-    s2_gguf_path: str = "/models/s2pro/s2-pro-q6_k.gguf"
-    s2_tokenizer_path: str = "/models/s2pro/tokenizer.json"
+    # GGUF + tokenizer paths are env-overridable so the operator can swap
+    # quantizations (Q6_K → Q4_K_M for 6 GB VRAM cards) without rebuilding
+    # the image. Compose passes S2PRO_GGUF_PATH / S2PRO_TOKENIZER_PATH.
+    s2_gguf_path: str = field(
+        default_factory=lambda: _env("S2PRO_GGUF_PATH", "/models/s2pro/s2-pro-q6_k.gguf")
+    )
+    s2_tokenizer_path: str = field(
+        default_factory=lambda: _env("S2PRO_TOKENIZER_PATH", "/models/s2pro/tokenizer.json")
+    )
     s2_ref_audio_path: str = "/voices/voice_martin_osborne_24k.wav"
     s2_ref_text: str = (
         "nunca te olvidé, nunca, el último beso que me diste todavía está "

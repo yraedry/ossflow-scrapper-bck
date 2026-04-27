@@ -200,26 +200,45 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
                         f"ERROR removing {candidate.name}: {exc}"
                     }))
 
-        pipeline = DubbingPipeline(config)
-        if input_path.is_file():
-            srt = _resolve_srt_for(input_path)
-            if srt is None:
-                raise FileNotFoundError(f"No Spanish SRT found for {input_path.name}")
-            emit(JobEvent(type="log", data={"message": f"using literal ES SRT: {srt.name}"}))
-            if force:
-                _remove_existing_output(input_path)
-            out = pipeline.process_file(input_path, srt)
-            emit(JobEvent(type="progress", data={"pct": 100, "videos": 1}))
-            emit(JobEvent(type="log", data={"message": f"dubbed: {out.name}"}))
-        else:
-            if force:
-                for vid in input_path.rglob("*"):
-                    if vid.is_file() and vid.suffix.lower() in (".mp4", ".mkv", ".mov", ".avi") \
-                            and "_DOBLADO" not in vid.stem \
-                            and vid.parent.name.lower() not in ("doblajes", "elevenlabs"):
-                        _remove_existing_output(vid)
-            results = pipeline.process_directory(input_path)
-            emit(JobEvent(type="progress", data={"pct": 100, "videos": len(results)}))
+        # S2-Pro lazy-load: the s2.cpp server holds ~5 GB VRAM (Q6_K) once
+        # the GGUF is mmap'd. On a 6 GB card (RTX 2060) that leaves no room
+        # for Demucs (fase 0/6, ~2 GB pico) or the voice cloner. So we
+        # ONLY boot it for the lifetime of this job, after Demucs has run
+        # and right before the synthesis fase. Kept off otherwise — idle
+        # VRAM stays near 0.
+        s2pro_manager = None
+        if tts_engine == "s2pro":
+            from dubbing_generator.tts.s2pro_server_manager import S2ProServerManager
+            s2pro_manager = S2ProServerManager(config)
+            app.state.s2pro_manager = s2pro_manager
+
+        pipeline = DubbingPipeline(config, s2pro_manager=s2pro_manager)
+        try:
+            if input_path.is_file():
+                srt = _resolve_srt_for(input_path)
+                if srt is None:
+                    raise FileNotFoundError(f"No Spanish SRT found for {input_path.name}")
+                emit(JobEvent(type="log", data={"message": f"using literal ES SRT: {srt.name}"}))
+                if force:
+                    _remove_existing_output(input_path)
+                out = pipeline.process_file(input_path, srt)
+                emit(JobEvent(type="progress", data={"pct": 100, "videos": 1}))
+                emit(JobEvent(type="log", data={"message": f"dubbed: {out.name}"}))
+            else:
+                if force:
+                    for vid in input_path.rglob("*"):
+                        if vid.is_file() and vid.suffix.lower() in (".mp4", ".mkv", ".mov", ".avi") \
+                                and "_DOBLADO" not in vid.stem \
+                                and vid.parent.name.lower() not in ("doblajes", "elevenlabs"):
+                            _remove_existing_output(vid)
+                results = pipeline.process_directory(input_path)
+                emit(JobEvent(type="progress", data={"pct": 100, "videos": len(results)}))
+        finally:
+            # Always release VRAM held by s2.cpp, even on exception/abort.
+            if s2pro_manager is not None:
+                emit(JobEvent(type="log", data={"message": "Stopping s2.cpp server (VRAM release)"}))
+                s2pro_manager.stop()
+                app.state.s2pro_manager = None
 
 
 app = create_app(service_name=SERVICE_NAME, task_fn=_run_dubbing_generator)
@@ -228,29 +247,17 @@ app = create_app(service_name=SERVICE_NAME, task_fn=_run_dubbing_generator)
 # ======================================================================
 # S2-Pro server lifecycle
 # ======================================================================
-
-def _start_s2pro_server() -> None:
-    """Boot s2.cpp HTTP server when FastAPI starts.
-
-    Reads engine + paths from env-derived defaults (DubbingConfig). The
-    manager is a no-op if engine != 's2pro' or the binary/model is
-    missing. Returns fast — readiness is polled on a daemon thread so
-    /health stays available during GGUF mmap.
-    """
-    from dubbing_generator.config import DubbingConfig
-    from dubbing_generator.tts.s2pro_server_manager import S2ProServerManager
-
-    # Read env, but treat empty string as "use default" — compose passes the
-    # var through with `${DUBBING_TTS_ENGINE:-}` so the key is always present
-    # (just empty when the operator hasn't pinned an engine globally). The
-    # bare os.environ.get(..., "s2pro") default only kicks in when the key
-    # is missing entirely, so we coalesce empty → "s2pro" explicitly.
-    engine = (os.environ.get("DUBBING_TTS_ENGINE") or "s2pro").strip().lower()
-    cfg = DubbingConfig(tts_engine=engine)
-    manager = S2ProServerManager(cfg)
-    manager.start()
-    app.state.s2pro_manager = manager
-
+#
+# Lazy-load model: NO startup hook. The s2.cpp server is booted by
+# `_run_dubbing_generator` only for the duration of an s2pro job and
+# stopped in its finally block. Rationale: the GGUF (Q6_K, ~5 GB)
+# residing in VRAM permanently would starve Demucs (fase 0/6) on a
+# 6 GB card (RTX 2060). Demucs and S2-Pro never coexist in the
+# pipeline so serializing them is correct.
+#
+# The shutdown hook is kept as a safety net in case the process exits
+# unexpectedly mid-job (uvicorn graceful shutdown still wants to
+# terminate any subprocess we spawned).
 
 def _stop_s2pro_server() -> None:
     manager = getattr(app.state, "s2pro_manager", None)
@@ -258,16 +265,19 @@ def _stop_s2pro_server() -> None:
         manager.stop()
 
 
-app.router.on_startup.append(_start_s2pro_server)
 app.router.on_shutdown.append(_stop_s2pro_server)
 
 
 @app.get("/s2pro/status")
 def s2pro_status() -> dict:
-    """Report whether the S2-Pro subprocess is running and ready."""
+    """Report whether the S2-Pro subprocess is running and ready.
+
+    With lazy-load the manager only exists during an active job; idle
+    GET returns ``{"running":false,"ready":false,"engine":"idle"}``.
+    """
     manager = getattr(app.state, "s2pro_manager", None)
     if manager is None:
-        return {"running": False, "ready": False, "engine": "n/a"}
+        return {"running": False, "ready": False, "engine": "idle"}
     proc = manager.process
     return {
         "running": proc is not None and proc.poll() is None,

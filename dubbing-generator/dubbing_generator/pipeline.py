@@ -114,13 +114,25 @@ class DubbingPipeline:
         self,
         config: DubbingConfig,
         progress_cb: ProgressCallback = None,
+        s2pro_manager=None,
     ) -> None:
         self.cfg = config
         self._progress_cb = progress_cb
+        # Optional: lifecycle hook for the s2.cpp HTTP server. When
+        # present, the pipeline boots it just before fase 3 (synthesis)
+        # so it doesn't hold VRAM during Demucs (fase 0). The caller is
+        # responsible for stopping it after the job ends.
+        self._s2pro_manager = s2pro_manager
 
         self.separator = AudioSeparator(config)
         self.voice_cloner = VoiceCloner(config)
-        self.synthesizer = build_synthesizer(config)
+        # Defer synthesizer construction until fase 3 ONLY when we own
+        # the s2.cpp lifecycle (manager passed in). If no manager is
+        # given, assume the server is already running externally
+        # (CLI / __main__ usage, tests) and build immediately so the
+        # legacy code path keeps working.
+        defer = (config.tts_engine == "s2pro" and s2pro_manager is not None)
+        self.synthesizer = None if defer else build_synthesizer(config)
         self.aligner = SyncAligner(config)
         self.drift = DriftCorrector(config)
         self.mixer = AudioMixer(config)
@@ -153,6 +165,11 @@ class DubbingPipeline:
         # 1. Separate background audio
         self._report(0, 6, "Separating background audio...")
         background_path = self.separator.separate(video_path)
+        # Demucs holds ~2 GB pyTorch tensors after the subprocess returns
+        # because the parent process still imports torch (loaded by other
+        # modules). Force a release before the s2.cpp server tries to mmap
+        # the ~5 GB GGUF — on a 6 GB card the difference is OOM vs. fits.
+        self._release_torch_vram()
 
         # 2. Voice reference from clean vocals stem (best for XTTS cloning)
         self._report(1, 6, "Extracting voice reference...")
@@ -185,6 +202,25 @@ class DubbingPipeline:
 
         # 4. Synthesize all phrases
         self._report(3, 6, "Synthesizing speech...")
+        # Lazy-boot s2.cpp server now that Demucs has released its VRAM.
+        # No-op for engines that don't use a manager (elevenlabs/piper/
+        # kokoro). For s2pro the synthesizer was deferred in __init__ so
+        # we build it AFTER the server is up.
+        if self._s2pro_manager is not None and self.cfg.tts_engine == "s2pro":
+            logger.info("Booting s2.cpp server (lazy-load before synthesis)...")
+            self._s2pro_manager.start()
+            ok = self._s2pro_manager.wait_until_ready(
+                timeout=self.cfg.s2_health_timeout_s
+            )
+            if not ok:
+                logger.error(
+                    "s2.cpp server failed to become ready in %.0fs — "
+                    "synthesis will yield silence and fail gracefully via the "
+                    "circuit breaker.",
+                    self.cfg.s2_health_timeout_s,
+                )
+            self.synthesizer = build_synthesizer(self.cfg)
+
         tts_segments = self._synthesize_all(
             planned, ref_wav,
             video_duration_ms=video_duration_ms,
@@ -1277,6 +1313,29 @@ class DubbingPipeline:
         except Exception as exc:
             logger.warning("ffprobe failed for %s: %s", video_path, exc)
             return None
+
+    @staticmethod
+    def _release_torch_vram() -> None:
+        """Free CUDA tensors / cached blocks held by torch in this process.
+
+        Demucs is invoked as a subprocess so the heavy allocations live
+        and die there, but the parent inherits torch state from earlier
+        imports (silero VAD, MOS scorer, etc.). Calling
+        ``empty_cache()`` after fase 0 is the cheapest way to make sure
+        s2.cpp's mmap of the 5 GB GGUF doesn't lose to fragmentation on
+        a 6 GB card.
+        """
+        try:
+            import torch  # type: ignore
+        except ImportError:
+            return
+        if not torch.cuda.is_available():
+            return
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("torch VRAM release skipped: %s", exc)
 
     def _report(self, step: int, total: int, message: str) -> None:
         logger.info("[%d/%d] %s", step, total, message)

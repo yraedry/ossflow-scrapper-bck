@@ -135,3 +135,30 @@ def test_stop_kills_when_terminate_times_out(monkeypatch):
     m.stop()
     proc.terminate.assert_called_once()
     proc.kill.assert_called_once()
+
+
+def test_start_is_idempotent_when_already_running(tmp_path: Path, monkeypatch):
+    """In process_directory the manager.start() is called once per
+    episode. We want to amortize the GGUF mmap across the batch by
+    reusing the running server, not spawning a new one each time."""
+    binary = tmp_path / "s2"; binary.write_text(""); binary.chmod(0o755)
+    monkeypatch.setattr(
+        "dubbing_generator.tts.s2pro_server_manager._S2_BINARY", binary,
+    )
+    (tmp_path / "model.gguf").write_text("")
+    (tmp_path / "tokenizer.json").write_text("")
+    cfg = DubbingConfig(
+        tts_engine="s2pro",
+        s2_gguf_path=str(tmp_path / "model.gguf"),
+        s2_tokenizer_path=str(tmp_path / "tokenizer.json"),
+    )
+    m = S2ProServerManager(cfg)
+    # Simulate first start having spawned a live process.
+    alive_proc = MagicMock(); alive_proc.poll.return_value = None
+    m._process = alive_proc
+
+    with patch("subprocess.Popen") as popen:
+        m.start()
+        popen.assert_not_called()
+    # The original process is still the one we have.
+    assert m._process is alive_proc
