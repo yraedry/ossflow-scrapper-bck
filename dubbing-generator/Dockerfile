@@ -1,12 +1,50 @@
 # syntax=docker/dockerfile:1.7
 # Build context: ../python
+
+# ----- Stage 1: s2.cpp Vulkan builder -----------------------------------
+FROM ubuntu:22.04 AS s2cpp-builder
+ARG S2CPP_REPO=https://github.com/rodrigomatta/s2.cpp
+ARG S2CPP_REF=e48ce8e02d8335bd9a0ba94679f605724b31d123
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+        libvulkan-dev glslang-tools spirv-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --recurse-submodules ${S2CPP_REPO} /src/s2.cpp \
+ && cd /src/s2.cpp && git checkout ${S2CPP_REF} \
+ && git submodule update --init --recursive
+
+WORKDIR /src/s2.cpp
+# -DS2_VULKAN=ON is the s2.cpp option name; CMakeLists forwards it to
+# GGML_VULKAN. Verified locally on 2026-04-27 against SHA e48ce8e0.
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DS2_VULKAN=ON \
+ && cmake --build build --parallel "$(nproc)"
+
+# ----- Stage 2: dubbing-generator runtime -------------------------------
 FROM bjj-base:latest
 
-# rubberband-cli: pitch-preserving high-quality time-stretch for dubbing
+# Vulkan loader only. The NVIDIA driver (passed via nvidia-container-toolkit
+# with NVIDIA_DRIVER_CAPABILITIES=graphics,...) supplies its own ICD JSON.
+# DO NOT install mesa-vulkan-drivers — it can preempt the NVIDIA ICD and
+# force a CPU fallback that hangs synthesis silently.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-        rubberband-cli wget espeak-ng
+        rubberband-cli wget espeak-ng \
+        libvulkan1 vulkan-tools \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=s2cpp-builder /src/s2.cpp/build/bin/s2 /usr/local/bin/s2
+# GGML is shared (4 libs verified locally on 2026-04-27 against SHA e48ce8e0):
+# libggml.so, libggml-base.so, libggml-cpu.so, libggml-vulkan.so. CMake emits
+# them under build/bin/ on Linux single-config builds. If a future s2.cpp
+# revision flips to static linking, this glob will fail-loud at build and
+# the implementer should remove this line + verify with
+# `docker run --rm --entrypoint ldd <image> /usr/local/bin/s2 | grep ggml`.
+COPY --from=s2cpp-builder /src/s2.cpp/build/bin/libggml*.so /usr/local/lib/
+RUN ldconfig
 
 COPY bjj_service_kit /app/bjj_service_kit
 COPY dubbing-generator/requirements.txt /app/requirements.txt
@@ -25,8 +63,7 @@ RUN mkdir -p /models/piper && cd /models/piper && \
     wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx && \
     wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/sharvard/medium/es_ES-sharvard-medium.onnx.json
 
-# Pre-cache Kokoro-82M model + ES voices into HF cache. Lazy load at first
-# inference would otherwise hit the network from inside the running service.
+# Pre-cache Kokoro-82M (kept as fallback engine, not the default).
 RUN python3 -c "from kokoro import KPipeline; KPipeline(lang_code='e')" || true
 
 COPY dubbing-generator /app/dubbing-generator
@@ -37,6 +74,6 @@ ENV HF_HOME=/models/huggingface \
     TRANSFORMERS_CACHE=/models/huggingface
 
 EXPOSE 8003
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
     CMD curl -fsS http://localhost:8003/health || exit 1
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8003"]
