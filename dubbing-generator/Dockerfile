@@ -2,14 +2,20 @@
 # Build context: ../python
 
 # ----- Stage 1: s2.cpp Vulkan builder -----------------------------------
-FROM ubuntu:22.04 AS s2cpp-builder
+# Ubuntu 24.04 (noble) ships Vulkan-Headers 1.3.275 + matching Vulkan-Hpp;
+# 22.04 (jammy)'s 1.3.204 is too old and breaks ggml-vulkan compilation
+# (vk::PhysicalDeviceProperties2 → VkPhysicalDeviceProperties2 conversion
+# was removed). Builder image bump only — the compiled binary links against
+# libvulkan.so.1 which is forward-compatible at runtime.
+FROM ubuntu:24.04 AS s2cpp-builder
 ARG S2CPP_REPO=https://github.com/rodrigomatta/s2.cpp
 ARG S2CPP_REF=e48ce8e02d8335bd9a0ba94679f605724b31d123
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git ca-certificates \
-        libvulkan-dev glslang-tools spirv-tools \
+        build-essential cmake git ca-certificates pkg-config \
+        libvulkan-dev vulkan-headers \
+        glslang-tools glslc spirv-tools \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --recurse-submodules ${S2CPP_REPO} /src/s2.cpp \
