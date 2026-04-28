@@ -75,13 +75,34 @@ class BackendClient:
         and the legacy flat contract (``{"status","progress",...}``).
         Reconnects on transient disconnect up to ``max_reconnects`` times.
         Stops when a terminal (done/error) event arrives.
+
+        404 handling: if a reconnect lands on a 404 *after* we already
+        saw at least one event, the job almost certainly completed and
+        was reaped from the backend's in-memory registry between our
+        reconnect attempts (or the backend itself restarted to free
+        VRAM). Treat that as "stream closed cleanly" rather than a
+        backend error — the alternative is marking a successful step
+        as FAILED, which we observed on long dubbing jobs (~70 min) where
+        the synthesis→mixing→mux transitions can sit silent for >120 s
+        and trip the read timeout.
+
+        First-attempt 404 (no events yet seen) keeps raising — that's a
+        genuine "job_id not found" and likely caller bug.
         """
         url = f"{self.base_url}/events/{job_id}"
         attempts = 0
+        seen_any_event = False
         while True:
             try:
                 async with httpx.AsyncClient(timeout=_STREAM_TIMEOUT) as client:
                     async with client.stream("GET", url) as resp:
+                        if resp.status_code == 404 and seen_any_event:
+                            log.info(
+                                "SSE 404 on reconnect for %s — job likely "
+                                "completed and reaped, treating as clean close",
+                                url,
+                            )
+                            return
                         if resp.status_code >= 400:
                             raise BackendError(
                                 f"stream {resp.status_code} on {url}"
@@ -94,6 +115,7 @@ class BackendClient:
                                     buffer = []
                                     if raw is not None:
                                         evt = normalize(raw)
+                                        seen_any_event = True
                                         yield evt
                                         if is_terminal(evt):
                                             return

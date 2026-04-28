@@ -81,6 +81,48 @@ async def test_stream_accepts_bjj_service_kit_contract():
     assert events[1].message == "boom"
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_404_on_reconnect_after_events_treated_as_clean_close():
+    """Long-running jobs may finish + get reaped from the backend
+    registry while the client is reconnecting after a read timeout.
+    The reconnect lands on 404, but the stream had already yielded
+    real events, so we treat it as a clean close instead of raising
+    BackendError (which would surface as step_failed even though the
+    job actually completed)."""
+    client = BackendClient("http://dub.test")
+    # First call: yields one event then closes without a terminal frame,
+    # which triggers a reconnect attempt.
+    sse_body = 'data: {"status": "running", "progress": 0.5}\n\n'
+    route = respx.get("http://dub.test/events/long-job").mock(
+        side_effect=[
+            httpx.Response(200, text=sse_body, headers={"content-type": "text/event-stream"}),
+            httpx.Response(404, text="job_id not found"),
+        ]
+    )
+    events = []
+    async for ev in client.stream("long-job", max_reconnects=2):
+        events.append(ev)
+    assert len(events) == 1
+    assert events[0].kind == "progress"
+    assert route.call_count == 2  # original + reconnect
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stream_404_on_first_connect_still_raises():
+    """A 404 on the very first attempt (no events ever seen) is a real
+    bug — the caller passed a bogus job_id. Keep raising so we don't
+    mask programmer errors."""
+    client = BackendClient("http://dub.test")
+    respx.get("http://dub.test/events/nonexistent").mock(
+        return_value=httpx.Response(404, text="job_id not found")
+    )
+    with pytest.raises(BackendError):
+        async for _ in client.stream("nonexistent"):
+            pass
+
+
 def test_parse_sse_block_ignores_comments():
     assert _parse_sse_block([": heartbeat"]) is None
 
