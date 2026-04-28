@@ -307,7 +307,7 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
           </div>
         )}
       </td>
-      <td className="px-3 py-2 text-xs tabular-nums text-zinc-500 shrink-0 whitespace-nowrap">
+      <td className="hidden sm:table-cell px-3 py-2 text-xs tabular-nums text-zinc-500 shrink-0 whitespace-nowrap">
         {fmtDuration(video.duration)}
       </td>
       <td className="px-3 py-2">
@@ -346,8 +346,8 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
             onClick={() => setPlayerOpen(true)}
             title="Ver capítulo"
           >
-            <Eye className="mr-1 h-3 w-3" />
-            Ver
+            <Eye className="h-3 w-3 sm:mr-1" />
+            <span className="hidden sm:inline">Ver</span>
           </Button>
           <Button
             size="sm"
@@ -356,8 +356,8 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
             disabled={!hasSubs}
             title={hasSubs ? 'Validar calidad de los subtítulos (detectar alucinaciones)' : 'Sin subtítulos EN que validar'}
           >
-            <ShieldCheck className="mr-1 h-3 w-3" />
-            Validar
+            <ShieldCheck className="h-3 w-3 sm:mr-1" />
+            <span className="hidden sm:inline">Validar</span>
           </Button>
           <Button
             size="sm"
@@ -373,19 +373,21 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
             className="text-violet-400 hover:text-violet-300"
           >
             {startElevenLabs.isPending || elevenLabsJobId ? (
-              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+              <Loader2 className="h-3 w-3 sm:mr-1 animate-spin" />
             ) : (
-              <Mic className="mr-1 h-3 w-3" />
+              <Mic className="h-3 w-3 sm:mr-1" />
             )}
-            {elevenLabsJobId
-              ? `ElevenLabs ${elevenLabsJob.data?.progress ?? 0}%`
-              : 'ElevenLabs'}
+            <span className="hidden sm:inline">
+              {elevenLabsJobId
+                ? `ElevenLabs ${elevenLabsJob.data?.progress ?? 0}%`
+                : 'ElevenLabs'}
+            </span>
           </Button>
           <DropdownMenu open={processOpen} onOpenChange={setProcessOpen}>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="ghost" onClick={openProcessMenu}>
-                <Play className="mr-1 h-3 w-3" />
-                Procesar
+              <Button size="sm" variant="ghost" onClick={openProcessMenu} title="Procesar capítulo">
+                <Play className="h-3 w-3 sm:mr-1" />
+                <span className="hidden sm:inline">Procesar</span>
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-52 p-2">
@@ -847,13 +849,15 @@ export default function ChaptersTab({ instructional }) {
           className="overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-950/50"
         >
           <AccordionTrigger className="px-4 hover:no-underline">
-            <div className="flex w-full items-center gap-3">
-              <span className="font-semibold text-zinc-100">{season}</span>
-              <Badge variant="secondary" className="font-mono">
-                {list.length} caps
-              </Badge>
+            <div className="flex w-full flex-col items-start gap-2 sm:flex-row sm:items-center sm:gap-3">
+              <div className="flex items-center gap-3">
+                <span className="font-semibold text-zinc-100">{season}</span>
+                <Badge variant="secondary" className="font-mono">
+                  {list.length} caps
+                </Badge>
+              </div>
               <div
-                className="ml-auto mr-2 flex items-center gap-2"
+                className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:mr-2 sm:w-auto sm:flex-nowrap"
                 onClick={(e) => e.stopPropagation()}
               >
                 {season === 'Sin temporada' ? (
@@ -908,7 +912,7 @@ export default function ChaptersTab({ instructional }) {
                   <tr>
                     <th className="px-3 py-2 text-left font-medium w-20">Código</th>
                     <th className="px-3 py-2 text-left font-medium">Título</th>
-                    <th className="px-3 py-2 text-left font-medium w-20 whitespace-nowrap">Duración</th>
+                    <th className="hidden sm:table-cell px-3 py-2 text-left font-medium w-20 whitespace-nowrap">Duración</th>
                     <th className="px-3 py-2 text-left font-medium w-28">Estado</th>
                     <th className="px-3 py-2 text-right font-medium w-auto whitespace-nowrap">Acción</th>
                   </tr>
