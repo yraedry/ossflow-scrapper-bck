@@ -324,21 +324,21 @@ export default function PipelinesListPage() {
   }
 
   return (
-    <div className="p-6">
-      <div className="mb-6 flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-zinc-100">Pipelines</h1>
-          <p className="text-sm text-zinc-500 mt-1">
+    <div className="p-4 sm:p-6">
+      <div className="mb-4 sm:mb-6 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-semibold text-zinc-100">Pipelines</h1>
+          <p className="text-xs sm:text-sm text-zinc-500 mt-1">
             Historial y monitorización de pipelines. {hasRunning && (
-              <span className="text-amber-400 ml-1 inline-flex items-center gap-1">
+              <span className="text-amber-400ml-1 inline-flex items-center gap-1">
                 <Loader2 className="h-3 w-3 animate-spin" /> actualizando cada 2s
               </span>
             )}
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
-          <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", isFetching && "animate-spin")} />
-          Actualizar
+        <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching} className="shrink-0">
+          <RefreshCw className={cn("h-3.5 w-3.5 sm:mr-1.5", isFetching && "animate-spin")} />
+          <span className="hidden sm:inline">Actualizar</span>
         </Button>
       </div>
 
@@ -401,7 +401,7 @@ export default function PipelinesListPage() {
             setFromDate(e.target.value)
             setPage(1)
           }}
-          className="w-full sm:w-[160px]"
+          className="hidden sm:block sm:w-[160px]"
           title="Desde"
         />
         <Input
@@ -411,7 +411,7 @@ export default function PipelinesListPage() {
             setToDate(e.target.value)
             setPage(1)
           }}
-          className="w-full sm:w-[160px]"
+          className="hidden sm:block sm:w-[160px]"
           title="Hasta"
         />
         {(statusFilter !== "all" || typeFilter !== "all" || search || fromDate || toDate) && (
@@ -450,12 +450,12 @@ export default function PipelinesListPage() {
               <TableHead className="w-[140px]">
                 <SortButton label="Estado" column="status" sort={sort} setSort={setSort} />
               </TableHead>
-              <TableHead className="w-[180px]">Tipo</TableHead>
-              <TableHead className="w-[160px]">Pasos</TableHead>
-              <TableHead className="w-[110px]">
+              <TableHead className="hidden md:table-cell w-[180px]">Tipo</TableHead>
+              <TableHead className="hidden lg:table-cell w-[160px]">Pasos</TableHead>
+              <TableHead className="hidden md:table-cell w-[110px]">
                 <SortButton label="Duración" column="duration" sort={sort} setSort={setSort} />
               </TableHead>
-              <TableHead className="w-[120px]">
+              <TableHead className="hidden md:table-cell w-[120px]">
                 <SortButton label="Inicio" column="created_at" sort={sort} setSort={setSort} />
               </TableHead>
               <TableHead className="w-[110px] text-right">Acciones</TableHead>
@@ -467,10 +467,10 @@ export default function PipelinesListPage() {
                 <TableRow key={`sk-${i}`}>
                   <TableCell><Skeleton className="h-4 w-3/4" /></TableCell>
                   <TableCell><Skeleton className="h-5 w-20" /></TableCell>
-                  <TableCell><Skeleton className="h-5 w-28" /></TableCell>
-                  <TableCell><Skeleton className="h-3 w-24" /></TableCell>
-                  <TableCell><Skeleton className="h-4 w-12" /></TableCell>
-                  <TableCell><Skeleton className="h-4 w-16" /></TableCell>
+                  <TableCell className="hidden md:table-cell"><Skeleton className="h-5 w-28" /></TableCell>
+                  <TableCell className="hidden lg:table-cell"><Skeleton className="h-3 w-24" /></TableCell>
+                  <TableCell className="hidden md:table-cell"><Skeleton className="h-4 w-12" /></TableCell>
+                  <TableCell className="hidden md:table-cell"><Skeleton className="h-4 w-16" /></TableCell>
                   <TableCell><Skeleton className="h-7 w-20 ml-auto" /></TableCell>
                 </TableRow>
               ))
@@ -527,16 +527,16 @@ export default function PipelinesListPage() {
                           {STATUS_LABEL[status] || status}
                         </Badge>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="hidden md:table-cell">
                         <StepBadges stepNames={extractStepNames(p)} />
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="hidden lg:table-cell">
                         <MiniProgress pipeline={p} />
                       </TableCell>
-                      <TableCell className="text-xs tabular-nums text-zinc-400">
+                      <TableCell className="hidden md:table-cell text-xs tabular-nums text-zinc-400">
                         {fmtDuration(p)}
                       </TableCell>
-                      <TableCell className="text-xs text-zinc-400">
+                      <TableCell className="hidden md:table-cell text-xs text-zinc-400">
                         {timeAgo(p.created_at)}
                       </TableCell>
                       <TableCell className="text-right">

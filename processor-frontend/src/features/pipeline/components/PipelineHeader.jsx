@@ -125,19 +125,19 @@ export default function PipelineHeader({ pipeline }) {
   const instructionalName = deriveInstructionalName(pipeline.path)
 
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-zinc-800/80 bg-zinc-950/60 px-6 py-4">
-      <div className="flex min-w-0 items-center gap-3">
-        <Button variant="ghost" size="icon" onClick={() => navigate(-1)} title="Volver">
+    <div className="flex flex-col gap-3 border-b border-zinc-800/80 bg-zinc-950/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-6 sm:py-4">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+        <Button variant="ghost" size="icon" onClick={() => navigate(-1)} title="Volver" className="shrink-0">
           <ArrowLeft className="h-4 w-4" />
         </Button>
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h1 className="truncate text-base font-semibold text-zinc-100" title={pipeline.path}>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="min-w-0 max-w-full truncate text-sm sm:text-base font-semibold text-zinc-100" title={pipeline.path}>
               {title}
             </h1>
             <span
               className={cn(
-                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide",
+                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] sm:text-[11px] font-medium uppercase tracking-wide shrink-0",
                 STATUS_BADGE[status] || STATUS_BADGE.pending
               )}
             >
@@ -145,33 +145,34 @@ export default function PipelineHeader({ pipeline }) {
               {STATUS_LABEL[status] || status}
             </span>
           </div>
-          <div className="mt-0.5 flex items-center gap-3 text-xs text-zinc-500">
-            <span className="font-mono">{pipeline.pipeline_id}</span>
-            <span>·</span>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] sm:text-xs text-zinc-500">
+            <span className="font-mono truncate max-w-[80px] sm:max-w-none">{pipeline.pipeline_id}</span>
+            <span className="hidden sm:inline">·</span>
             <span className="tabular-nums">{fmt(elapsed(pipeline, tick))}</span>
-            <span>·</span>
+            <span className="hidden sm:inline">·</span>
             <span>{pipeline.steps?.length ?? 0} pasos</span>
           </div>
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
         {instructionalName && (
           <Button
             variant="outline"
             size="sm"
             onClick={() => navigate(`/library/${encodeURIComponent(instructionalName)}`)}
+            title="Volver al instruccional"
           >
-            <BookOpen className="mr-1.5 h-3.5 w-3.5" />
-            Volver al instruccional
+            <BookOpen className="h-3.5 w-3.5 sm:mr-1.5" />
+            <span className="hidden sm:inline">Volver al instruccional</span>
           </Button>
         )}
         {isActive && (
           <AlertDialog>
             <AlertDialogTrigger asChild>
-              <Button variant="outline" size="sm" disabled={cancel.isPending}>
-                <X className="mr-1.5 h-3.5 w-3.5" />
-                Cancelar
+              <Button variant="outline" size="sm" disabled={cancel.isPending} title="Cancelar">
+                <X className="h-3.5 w-3.5 sm:mr-1.5" />
+                <span className="hidden sm:inline">Cancelar</span>
               </Button>
             </AlertDialogTrigger>
             <AlertDialogContent>
@@ -189,9 +190,9 @@ export default function PipelineHeader({ pipeline }) {
           </AlertDialog>
         )}
         {isFinal && (
-          <Button size="sm" variant="default" onClick={onRetry} disabled={retry.isPending}>
-            <RotateCw className={cn("mr-1.5 h-3.5 w-3.5", retry.isPending && "animate-spin")} />
-            Reintentar
+          <Button size="sm" variant="default" onClick={onRetry} disabled={retry.isPending} title="Reintentar">
+            <RotateCw className={cn("h-3.5 w-3.5 sm:mr-1.5", retry.isPending && "animate-spin")} />
+            <span className="hidden sm:inline">Reintentar</span>
           </Button>
         )}
       </div>
