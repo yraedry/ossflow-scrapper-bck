@@ -187,9 +187,31 @@ export default function LogPanel({ pipelineId, steps = [], onTerminal }) {
     const text = filtered
       .map((e) => `[${e.level}] ${e.step ? `(${e.step}) ` : ""}${e.message}`)
       .join("\n")
+    // navigator.clipboard requires a secure context (HTTPS or localhost).
+    // The app is served over plain HTTP from the LXC at 10.10.100.14 so we
+    // fall back to a hidden <textarea> + execCommand("copy"), which works
+    // in any context but needs a real DOM element on the page.
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text)
+        toast.success("Logs copiados al portapapeles")
+        return
+      } catch {
+        // fall through to execCommand fallback
+      }
+    }
     try {
-      await navigator.clipboard.writeText(text)
-      toast.success("Logs copiados al portapapeles")
+      const ta = document.createElement("textarea")
+      ta.value = text
+      ta.setAttribute("readonly", "")
+      ta.style.position = "fixed"
+      ta.style.opacity = "0"
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand("copy")
+      document.body.removeChild(ta)
+      if (ok) toast.success("Logs copiados al portapapeles")
+      else toast.error("No se pudo copiar")
     } catch {
       toast.error("No se pudo copiar")
     }
