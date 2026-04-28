@@ -474,7 +474,11 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
                 { key: 'translate', label: 'Traducir a ES', Icon: Languages, done: hasSubsEs },
                 { key: 'dubbing', label: 'Doblaje', Icon: Mic, done: hasDub },
               ].map(({ key, label, Icon: StepIcon, done }) => {
-                const locked = done && !forceRegen
+                // chapters: ignora force. Re-trocear un Season ya troceado
+                // borraría los capítulos actuales — destructivo, casi nunca
+                // intencional. Para "force" en chapters el usuario debe
+                // borrar la Season a mano y volver a trocear.
+                const locked = key === 'chapters' ? done : (done && !forceRegen)
                 return (
                 <button
                   key={key}
@@ -876,7 +880,10 @@ function SeasonProcessButton({ seasonPath, list, hasOracle, oracleData }) {
           { key: 'translate', label: 'Traducir a ES', Icon: Languages, done: allHaveSubsEs },
           { key: 'dubbing', label: 'Doblaje', Icon: Mic, done: allHaveDub },
         ].map(({ key, label, Icon: StepIcon, done }) => {
-          const locked = done && !forceRegen
+          // chapters siempre locked si done — re-trocear un Season completo
+          // borraría los capítulos actuales (destructivo, casi nunca
+          // intencional). Force aplica solo a los demás pasos.
+          const locked = key === 'chapters' ? done : (done && !forceRegen)
           return (
             <button
               key={key}
