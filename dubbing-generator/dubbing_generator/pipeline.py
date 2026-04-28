@@ -604,9 +604,17 @@ class DubbingPipeline:
         # TARGET -24 (antes -23): da 1 dB extra de headroom al duckling
         # boost (x1.6 = +4 dB) sin tocar límites de distorsión en el
         # mix final — el cuantil 90% del RMS percibido queda en -20 dBFS.
-        TARGET_RMS_DBFS = -24.0
-        MAX_BOOST = 18.0
-        MAX_CUT = 15.0
+        # S2-Pro tuning (vs older XTTS values -24/+18/-15): the boundary
+        # QA on Craig Jones S04E05 still showed 14 hard cuts with 7-11 dB
+        # RMS jumps after the previous values. S2-Pro's gated RMS lands
+        # in a tighter band per phrase but the pase capped outliers with
+        # too much margin. Tighten target + caps so the distribution
+        # converges within ~3 dB of TARGET, then let the pair-lift below
+        # mop up the rest. Target -22 also matches the perceived loudness
+        # of the BJJ coach reference better than -24 (less "narrative").
+        TARGET_RMS_DBFS = -22.0
+        MAX_BOOST = 14.0
+        MAX_CUT = 12.0
         # Gating threshold (ITU-R BS.1770 spirit): ignoramos silencio
         # residual bajo -40 dBFS al medir RMS. Sin gate, la cola de
         # ~100 ms bajo -55 dB que trim_silence deja detrás falsea la
@@ -690,8 +698,14 @@ class DubbingPipeline:
         # nudge the LOWER segment up — never push the louder one down,
         # because ducking downstream already leans on the voice track
         # having enough body.
-        PAIR_JUMP_TRIGGER_DB = 6.0
-        PAIR_LIFT_MAX_DB = 4.0
+        # Trigger lower (was 6.0) so we mop up the 4-6 dB residuals that
+        # the per-segment pass leaves between phrases the listener still
+        # hears. Lift cap raised (was 4.0) so an 11 dB jump can be closed
+        # to ~4 dB instead of 7 dB; peak guard below still prevents
+        # clipping. Together with the tighter MAX_BOOST/MAX_CUT this
+        # collapses the dispersion the boundary QA was flagging.
+        PAIR_JUMP_TRIGGER_DB = 4.0
+        PAIR_LIFT_MAX_DB = 7.0
         sorted_segs = sorted(
             (s for s in segments if s.audio is not None and len(s.audio) > 0),
             key=lambda s: s.start_ms,
