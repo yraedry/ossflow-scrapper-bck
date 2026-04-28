@@ -65,39 +65,48 @@ def _run_dubbing_generator(req: RunRequest, emit) -> None:
         from dubbing_generator.config import DubbingConfig  # type: ignore
         from dubbing_generator.pipeline import DubbingPipeline  # type: ignore
 
-        # Voice profile resolution (priority, highest first):
+        tts_engine = (
+            opts.get("tts_engine")
+            or os.environ.get("DUBBING_TTS_ENGINE")
+            or "s2pro"
+        ).strip().lower()
+
+        # Voice profile resolution applies only to engines that actually
+        # consume model_voice_path (XTTS-style cloning, ElevenLabs cloning).
+        # S2-Pro reads its reference exclusively from cfg.s2_ref_audio_path
+        # — running the resolver would emit "voice_profile not found" logs
+        # for a value the synth never reads.
+        #
+        # Priority for non-s2pro engines:
         #   1. opts.model_voice_path — explicit absolute path from caller
         #   2. opts.voice_profile    — filename like "narrador_es.wav"
         #      resolved inside /voices (what the UI selector sends)
         #   3. DUBBING_MODEL_VOICE_PATH env var — global default
         # Falls back to cloning the instructor's own voice if none apply.
-        model_voice_path = opts.get("model_voice_path") or ""
-        voice_profile = opts.get("voice_profile") or ""
-        if not model_voice_path and voice_profile:
-            candidate = Path("/voices") / voice_profile
-            if candidate.exists():
-                model_voice_path = str(candidate)
-            else:
-                emit(JobEvent(type="log", data={
-                    "message": f"voice_profile '{voice_profile}' not found in /voices — cloning instructor"
-                }))
-        if not model_voice_path:
-            model_voice_path = os.environ.get("DUBBING_MODEL_VOICE_PATH") or ""
+        model_voice_path = ""
+        use_model_voice = False
+        if tts_engine != "s2pro":
+            model_voice_path = opts.get("model_voice_path") or ""
+            voice_profile = opts.get("voice_profile") or ""
+            if not model_voice_path and voice_profile:
+                candidate = Path("/voices") / voice_profile
+                if candidate.exists():
+                    model_voice_path = str(candidate)
+                else:
+                    emit(JobEvent(type="log", data={
+                        "message": f"voice_profile '{voice_profile}' not found in /voices — cloning instructor"
+                    }))
+            if not model_voice_path:
+                model_voice_path = os.environ.get("DUBBING_MODEL_VOICE_PATH") or ""
 
-        use_model_voice = bool(opts.get("use_model_voice"))
-        if not use_model_voice and model_voice_path:
-            use_model_voice = Path(model_voice_path).exists()
-
-        tts_engine = (
-            opts.get("tts_engine")
-            or os.environ.get("DUBBING_TTS_ENGINE")
-            or "elevenlabs"
-        ).strip().lower()
+            use_model_voice = bool(opts.get("use_model_voice"))
+            if not use_model_voice and model_voice_path:
+                use_model_voice = Path(model_voice_path).exists()
         if tts_engine not in ("s2pro", "elevenlabs", "piper", "kokoro"):
             emit(JobEvent(type="log", data={
-                "message": f"unsupported tts_engine={tts_engine!r}, using 'elevenlabs'"
+                "message": f"unsupported tts_engine={tts_engine!r}, using 's2pro'"
             }))
-            tts_engine = "elevenlabs"
+            tts_engine = "s2pro"
 
         config_kwargs = dict(
             use_model_voice=use_model_voice,

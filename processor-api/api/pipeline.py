@@ -424,18 +424,26 @@ def _client_and_payload(
         opts: dict = {"skip_translation": True}
         if options.get("force"):
             opts["force"] = True
-        # Explicit voice_profile in options wins; else fall back to the one
-        # stored in the instructional's sidecar. Empty = clone instructor.
-        vp = options.get("voice_profile") or _load_voice_profile_for_path(path)
-        if vp:
-            opts["voice_profile"] = vp
-            opts["use_model_voice"] = True
-        elif options.get("use_model_voice", False):
-            opts["use_model_voice"] = True
-        # TTS engine selector. Soportados: 'elevenlabs' (cloud, paid) y
-        # 'piper' (local ONNX, gratis, sin cloning).
-        engine = options.get("tts_engine") or get_setting("tts_engine") or "elevenlabs"
+        # TTS engine selector — resolved first because it gates whether the
+        # per-instructional voice_profile sidecar applies. S2-Pro reads its
+        # voice exclusively from the global s2_voice_profile setting (mapped
+        # below to s2_ref_audio_path); the per-instructional voice_profile
+        # sidecar is XTTS/ElevenLabs-era state and would silently override
+        # the user's global S2-Pro voice if propagated. Soportados: 's2pro'
+        # (default, local clone), 'elevenlabs' (cloud), 'piper'/'kokoro'
+        # (local preset).
+        engine = options.get("tts_engine") or get_setting("tts_engine") or "s2pro"
         opts["tts_engine"] = str(engine).strip().lower()
+        if opts["tts_engine"] != "s2pro":
+            # Explicit voice_profile in options wins; else fall back to the
+            # one stored in the instructional's sidecar. Empty = clone
+            # instructor.
+            vp = options.get("voice_profile") or _load_voice_profile_for_path(path)
+            if vp:
+                opts["voice_profile"] = vp
+                opts["use_model_voice"] = True
+            elif options.get("use_model_voice", False):
+                opts["use_model_voice"] = True
         if opts["tts_engine"] == "elevenlabs":
             voice_id = (
                 options.get("elevenlabs_voice_id")

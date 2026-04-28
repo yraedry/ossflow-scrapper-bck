@@ -171,11 +171,25 @@ class DubbingPipeline:
         # the ~5 GB GGUF — on a 6 GB card the difference is OOM vs. fits.
         self._release_torch_vram()
 
-        # 2. Voice reference from clean vocals stem (best for XTTS cloning)
+        # 2. Voice reference.
+        #
+        # S2-Pro uses cfg.s2_ref_audio_path directly inside SynthesizerS2Pro
+        # (the global voice WAV from settings, e.g. Martin Osborne). The
+        # reference_wav arg passed to synth.generate() is ignored — see
+        # SynthesizerS2Pro.generate(). Running VoiceCloner here would build
+        # a 30-60 s VAD'd extract from the instructor's vocals and then
+        # throw it away, plus emit a misleading "Using override voice
+        # profile" log. Skip it entirely for s2pro.
+        #
+        # Other engines (ElevenLabs cloning, Piper, Kokoro) genuinely
+        # consume the returned ref_wav, so keep the existing path.
         self._report(1, 6, "Extracting voice reference...")
-        vocals_stem = video_path.with_name(f"{video_path.stem}_VOCALS.wav")
-        effective_voice_ref = voice_ref or (vocals_stem if vocals_stem.exists() else None)
-        ref_wav = self.voice_cloner.get_reference(video_path, effective_voice_ref)
+        if self.cfg.tts_engine == "s2pro":
+            ref_wav = Path(self.cfg.s2_ref_audio_path)
+        else:
+            vocals_stem = video_path.with_name(f"{video_path.stem}_VOCALS.wav")
+            effective_voice_ref = voice_ref or (vocals_stem if vocals_stem.exists() else None)
+            ref_wav = self.voice_cloner.get_reference(video_path, effective_voice_ref)
 
         # 3. Parse SRT, plan alignment (pass video duration so the last phrase
         #    can borrow the tail gap instead of spilling past end of video).
@@ -291,8 +305,11 @@ class DubbingPipeline:
         except Exception:
             logger.exception("QA failed for %s (non-fatal)", output_video.name)
 
-        # Cleanup (vocals stem only if auto-generated)
-        vocals_stem_to_clean = vocals_stem if (not voice_ref and vocals_stem.exists()) else None
+        # Cleanup. For s2pro the vocals stem was never bound (we skipped the
+        # cloner branch); we still want to remove the artefact Demucs left
+        # on disk so build artifacts don't accumulate per-episode.
+        vocals_stem_path = video_path.with_name(f"{video_path.stem}_VOCALS.wav")
+        vocals_stem_to_clean = vocals_stem_path if (not voice_ref and vocals_stem_path.exists()) else None
         self._cleanup(output_audio, background_path, *(p for p in [vocals_stem_to_clean] if p))
 
         self._report(6, 6, f"Done: {output_video.name}")

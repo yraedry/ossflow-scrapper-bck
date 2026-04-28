@@ -30,6 +30,7 @@ def test_run_dubbing_generator_accepts_s2pro_engine():
     import app as dub_app
     src = inspect.getsource(dub_app._run_dubbing_generator)
     assert '"s2pro"' in src
-    # Migration is opt-in: env-fallback must remain elevenlabs.
-    assert 'or "s2pro"' not in src
-    assert 'or "elevenlabs"' in src
+    # S2-Pro is the default engine since the migration completed (memory:
+    # project_s2pro_integration). Env-fallback resolves to s2pro when
+    # DUBBING_TTS_ENGINE is unset.
+    assert 'or "s2pro"' in src

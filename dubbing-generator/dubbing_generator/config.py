@@ -16,11 +16,14 @@ class DubbingConfig:
     """All dubbing pipeline parameters in one place."""
 
     # ------------------------------------------------------------------
-    # TTS (Coqui XTTS-v2)
+    # TTS — default engine: S2-Pro (fish-speech via s2.cpp HTTP server).
     # ------------------------------------------------------------------
-    # Voice cloning + code-switching ES/EN. The low-level ``Xtts`` API caches
-    # speaker conditioning latents per reference WAV, so every phrase in a
-    # chapter shares the same timbre. See ``tts/synthesizer_xttsv2.py``.
+    # Voice cloning over a reference WAV + matching transcript pair. The
+    # XTTS / ElevenLabs / Piper / Kokoro fields below are kept as live
+    # defaults so DubbingConfig stays backwards-compatible with the
+    # callers that still reference them, but only the s2_* fields and
+    # generic merge/crossfade fields are read by the active code path.
+    # See ``tts/synthesizer_s2pro.py``.
 
     # Ronda 9 — Iter 3: vuelve a 1.05 (baseline). Iter 2 (1.02) no
     # redujo los saltos de timbre — confirmando que son intrínsecos
@@ -87,11 +90,11 @@ class DubbingConfig:
     # reportado en E02/E03.
     tts_top_p: float = 0.85
 
-    # Engine selector. Only 'elevenlabs' is supported — XTTS fields below
-    # are kept as dataclass defaults so DubbingConfig stays backwards-
-    # compatible with callers that reference them, but the code path is
-    # gone.
-    tts_engine: str = "s2pro"     # was: "elevenlabs"
+    # Engine selector. Default is 's2pro' (local fish-speech via s2.cpp).
+    # 'elevenlabs' / 'piper' / 'kokoro' are alternative active engines;
+    # 'xtts' fields below are vestigial — kept as dataclass defaults so
+    # external callers don't break, but no synthesizer reads them.
+    tts_engine: str = "s2pro"
     xtts_model_name: str = ""
     xtts_config_path: str = ""
     xtts_checkpoint_dir: str = ""
@@ -373,13 +376,15 @@ class DubbingConfig:
     # prompt, el modelo mantiene entonación continua y los límites
     # resultantes son mucho menos "cortados".
     #
-    # Cap 160 chars (antes 200): prompts más cortos reducen la ventana
-    # en la que XTTS se desvía a otros idiomas (cap2 alucinaba a chino
-    # en los merges largos). 160 cubre 2-3 frases cortas sin entrar en
-    # zona de riesgo.
+    # Cap 300 chars (s2pro-tuned). The XTTS-era cap was 160 to dodge
+    # cross-language hallucination inside long merges, irrelevant for
+    # s2.cpp. 300 keeps phrases under the 800-token degradation threshold
+    # while collapsing more SRT splits into single prompts (~25-40%
+    # fewer renders per episode) — net reduction in boundary count and
+    # smoother prosody. ElevenLabs overrides to 500 in app.py.
     merge_consecutive_blocks: bool = True
     merge_max_gap_ms: int = 400
-    merge_max_chars: int = 160
+    merge_max_chars: int = 300
 
     # ------------------------------------------------------------------
     # Paths / file discovery

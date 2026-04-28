@@ -61,10 +61,12 @@ def test_client_and_payload_uses_chained_for_subtitles(monkeypatch):
 
 def test_client_and_payload_uses_chained_for_dubbing(monkeypatch):
     monkeypatch.setattr(pipeline_module, "get_library_path", lambda: "")
+    # voice_profile only propagates for non-s2pro engines (s2pro reads its
+    # voice exclusively from s2_voice_profile / s2_ref_audio_path).
     client, payload, _ = _client_and_payload(
         "dubbing",
         "/media/Show/original.mkv",
-        {"voice_profile": "gordon"},
+        {"voice_profile": "gordon", "tts_engine": "elevenlabs"},
         chained_path="/media/Show/Season 01",
     )
     assert payload["input_path"] == "/media/Show/Season 01"

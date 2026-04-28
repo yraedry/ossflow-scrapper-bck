@@ -49,6 +49,26 @@ class SynthesizerS2Pro:
         # Set to True after a connection failure so the next request that
         # bypasses the breaker forces a server restart before retrying.
         self._needs_restart = False
+        # Loud warning when ref_text is the dataclass default but the WAV
+        # is NOT the matching default WAV. The clone collapses if the two
+        # disagree (the model conditions on aligned phoneme→codec pairs)
+        # so this is the most common foot-gun: user swaps voice in
+        # settings UI but forgets to update the transcript. Detected here
+        # rather than at request time so it shows up exactly once per job.
+        default_ref_text = DubbingConfig.__dataclass_fields__["s2_ref_text"].default
+        default_ref_wav = DubbingConfig.__dataclass_fields__["s2_ref_audio_path"].default
+        if (
+            config.s2_ref_text == default_ref_text
+            and config.s2_ref_audio_path != default_ref_wav
+        ):
+            logger.warning(
+                "S2-Pro: ref WAV is %s but ref_text is the default transcript "
+                "for %s. Voice cloning collapses when audio and transcript "
+                "drift — update s2_ref_text in Settings (or save a sidecar "
+                "transcript next to the WAV).",
+                Path(config.s2_ref_audio_path).name,
+                Path(default_ref_wav).name,
+            )
 
     @property
     def sample_rate(self) -> int:
