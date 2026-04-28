@@ -195,7 +195,11 @@ services:
       # Native ES voice samples. Drop a WAV (16-24kHz mono, 20-40 s of clean
       # Spanish speech) and set DUBBING_MODEL_VOICE_PATH to avoid the
       # instructor's English accent bleeding into the ES output.
-      - ./dubbing-generator/voices:/voices:ro
+      # Read/write so the settings UI can persist the reference transcript
+      # as a sidecar ``<stem>.txt`` next to each WAV (PUT /voices/{name}/
+      # transcript). The WAVs themselves are operator-managed; nothing in
+      # the dubbing pipeline rewrites them.
+      - ./dubbing-generator/voices:/voices:rw
       # S2-Pro GGUF + tokenizer. Place s2-pro-q6_k.gguf and tokenizer.json in
       # ${S2PRO_MODEL_DIR}. Read-only mount; the model file is large (4.5 GB)
       # so we never bake it into the image.

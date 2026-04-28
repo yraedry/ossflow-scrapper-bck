@@ -370,7 +370,18 @@ def save_voice_transcript(filename: str, body: _TranscriptBody) -> dict:
     if not voice_path.exists() or not voice_path.is_file():
         raise HTTPException(status_code=404, detail="voice not found")
     sidecar = _transcript_path_for(voice_path)
-    sidecar.write_text((body.transcript or "").strip() + "\n", encoding="utf-8")
+    try:
+        sidecar.write_text((body.transcript or "").strip() + "\n", encoding="utf-8")
+    except OSError as exc:
+        # Most common: the /voices bind-mount was declared :ro in compose.
+        # Surface a useful message instead of FastAPI's generic 500.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Cannot write transcript to {sidecar}: {exc}. "
+                "Check that /voices is mounted read/write in docker-compose."
+            ),
+        ) from exc
     return {"ok": True, "voice": filename, "transcript_path": str(sidecar)}
 
 
