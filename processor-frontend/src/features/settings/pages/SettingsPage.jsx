@@ -451,7 +451,7 @@ function NasMountCard({ onMounted }) {
                 <p className="text-xs text-destructive mt-1">{form.formState.errors.share.message}</p>
               )}
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <Label htmlFor="nas-user">Usuario</Label>
                 <Input
@@ -558,7 +558,7 @@ function ProcessingSection({ settings }) {
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <Label htmlFor="source_lang">Idioma origen</Label>
               <Input
@@ -739,7 +739,7 @@ function TtsSection({ settings }) {
                   Debe coincidir EXACTAMENTE con lo que se dice en el WAV. La discrepancia colapsa la calidad de clonación.
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <Label htmlFor="s2_temperature">Temperature</Label>
                   <Input

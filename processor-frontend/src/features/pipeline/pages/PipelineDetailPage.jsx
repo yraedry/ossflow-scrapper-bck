@@ -68,8 +68,8 @@ export default function PipelineDetailPage() {
             <Skeleton className="h-3 w-40" />
           </div>
         </div>
-        <div className="flex flex-1">
-          <div className="flex-1 space-y-4 p-6">
+        <div className="flex flex-col lg:flex-row flex-1">
+          <div className="flex-1 space-y-4 p-4 sm:p-6">
             {[0, 1, 2, 3].map((i) => (
               <div key={i} className="flex gap-4">
                 <Skeleton className="h-9 w-9 rounded-full" />
@@ -80,7 +80,7 @@ export default function PipelineDetailPage() {
               </div>
             ))}
           </div>
-          <div className="w-[480px] border-l border-zinc-800/80 p-4">
+          <div className="hidden lg:block w-[480px] border-l border-zinc-800/80 p-4">
             <Skeleton className="h-full w-full" />
           </div>
         </div>
@@ -118,13 +118,18 @@ export default function PipelineDetailPage() {
   return (
     <div className="flex h-full flex-col bg-zinc-950">
       <PipelineHeader pipeline={pipeline} />
-      <div className="flex min-h-0 flex-1">
-        <div className="min-w-0 flex-1 overflow-auto px-6 py-6">
+      <div className="flex flex-col lg:flex-row min-h-0 flex-1">
+        <div className="min-w-0 flex-1 overflow-auto px-4 sm:px-6 py-4 sm:py-6">
           <StepTimeline steps={pipeline.steps || []} eta={eta}>
             {(step) => <StepDiff diff={step.diff} />}
           </StepTimeline>
         </div>
-        <LogPanel pipelineId={pipeline.pipeline_id} steps={pipeline.steps || []} />
+        {/* LogPanel is a fixed 480px wide rail; on <lg viewports it crushes
+            the timeline, so we hide it. Logs are still reachable from the
+            Library/Logs tab. */}
+        <div className="hidden lg:block">
+          <LogPanel pipelineId={pipeline.pipeline_id} steps={pipeline.steps || []} />
+        </div>
       </div>
     </div>
   )

@@ -363,7 +363,7 @@ export default function PipelinesListPage() {
             setPage(1)
           }}
         >
-          <SelectTrigger className="w-[180px]">
+          <SelectTrigger className="w-full sm:w-[180px]">
             <Filter className="h-3.5 w-3.5 mr-1.5 text-zinc-500" />
             <SelectValue />
           </SelectTrigger>
@@ -382,7 +382,7 @@ export default function PipelinesListPage() {
             setPage(1)
           }}
         >
-          <SelectTrigger className="w-[180px]">
+          <SelectTrigger className="w-full sm:w-[180px]">
             <Layers className="h-3.5 w-3.5 mr-1.5 text-zinc-500" />
             <SelectValue />
           </SelectTrigger>
@@ -401,7 +401,7 @@ export default function PipelinesListPage() {
             setFromDate(e.target.value)
             setPage(1)
           }}
-          className="w-[160px]"
+          className="w-full sm:w-[160px]"
           title="Desde"
         />
         <Input
@@ -411,7 +411,7 @@ export default function PipelinesListPage() {
             setToDate(e.target.value)
             setPage(1)
           }}
-          className="w-[160px]"
+          className="w-full sm:w-[160px]"
           title="Hasta"
         />
         {(statusFilter !== "all" || typeFilter !== "all" || search || fromDate || toDate) && (
@@ -440,7 +440,7 @@ export default function PipelinesListPage() {
       )}
 
       {/* Table */}
-      <div className="rounded-md border border-zinc-800/60 bg-zinc-950/40 overflow-hidden">
+      <div className="rounded-md border border-zinc-800/60 bg-zinc-950/40 overflow-x-auto">
         <Table>
           <TableHeader>
             <TableRow>

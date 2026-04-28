@@ -23,7 +23,11 @@ const DialogContent = React.forwardRef(({ className, children, ...props }, ref) 
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 sm:rounded-lg",
+        // On mobile: leave a margin on each side (w-[calc(100%-2rem)]) and
+        // cap height so the dialog never exceeds the viewport, with vertical
+        // overflow scrolled inside the dialog. On sm+ go back to the classic
+        // centered max-w-lg shadcn default.
+        "fixed left-[50%] top-[50%] z-50 grid w-[calc(100%-2rem)] max-w-[calc(100%-2rem)] sm:w-full sm:max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-4 sm:p-6 shadow-lg duration-200 rounded-lg sm:rounded-lg",
         className
       )}
       {...props}
