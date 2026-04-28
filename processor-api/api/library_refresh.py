@@ -44,12 +44,75 @@ def _probe_duration(path: Path) -> float | None:
     except Exception:
         pass
     return None
+
+
+# Spanish language tags emitted by various muxers (ffmpeg, MakeMKV, mp4box…).
+# We normalise to lowercase before checking. ``""`` (untagged) explicitly does
+# NOT count — many original instructionals ship audio with no language tag and
+# we'd false-positive every chapter as already-dubbed.
+_SPANISH_LANG_TAGS = frozenset({"spa", "es", "esp", "spanish", "español"})
+
+
+def _probe_audio_languages(path: Path) -> list[str]:
+    """Return the language tag of every audio stream in *path*, lowercased.
+
+    Untagged streams produce an empty string at their position so we can still
+    count tracks. Cost is ~30-80 ms per call cold; rely on the per-video cache
+    in ``library.json`` to avoid re-running on unchanged files.
+    """
+    try:
+        r = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream_tags=language",
+                "-of", "default=nw=1:nk=1",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode != 0:
+            return []
+        # Each non-empty line is one audio stream's language tag (or "und").
+        # Empty lines = untagged streams; preserve them as "".
+        out = []
+        for ln in r.stdout.splitlines():
+            tag = ln.strip().lower()
+            out.append("" if tag == "und" else tag)
+        return out
+    except Exception:
+        return []
+
+
+def _has_spanish_audio(audio_languages: list[str] | None) -> bool:
+    """True if any cached audio language is a recognised Spanish tag."""
+    if not audio_languages:
+        return False
+    return any(lang in _SPANISH_LANG_TAGS for lang in audio_languages)
+
+
+def _file_fingerprint(path: Path) -> tuple[int, int] | None:
+    """Cheap (mtime_int, size) tuple used to invalidate the audio_languages
+    cache when the file is rewritten (e.g. after a promotion remux)."""
+    try:
+        st = path.stat()
+        return (int(st.st_mtime), st.st_size)
+    except OSError:
+        return None
+
+
 _DUB_SUFFIXES = ("_DOBLADO.mkv", "_DOBLADO.mp4")
 _CHAPTER_RE = re.compile(r"S\d{2}E\d{2}")
 
 
-def _video_flags(video_path: Path) -> dict[str, Any]:
-    """Re-stat sidecars for one video. Returns fields to merge onto the cached entry."""
+def _video_flags(video_path: Path, cached: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Re-stat sidecars for one video. Returns fields to merge onto the cached entry.
+
+    ``cached`` is the previous entry from library.json (if any). We use it to
+    reuse the audio_languages probe result when the file fingerprint is
+    unchanged — ffprobe is cheap individually but the library has thousands
+    of chapters and probing every one on every refresh would dominate cost.
+    """
     folder = video_path.parent
     base = video_path.stem
     has_srt = (folder / f"{base}.en.srt").exists() or (folder / f"{base}.srt").exists()
@@ -61,26 +124,64 @@ def _video_flags(video_path: Path) -> dict[str, Any]:
         or (folder / f"{base}_ES.srt").exists()
         or (folder / f"{base}_ESP_DUB.srt").exists()
     )
+
+    # Audio language detection — survives "promote" (which removes the
+    # doblajes/ sidecar but leaves the merged .mkv with embedded ES audio).
+    fingerprint = _file_fingerprint(video_path)
+    cached_fp = None
+    audio_languages: list[str] | None = None
+    if cached is not None:
+        cached_fp_raw = cached.get("audio_fingerprint")
+        if isinstance(cached_fp_raw, list) and len(cached_fp_raw) == 2:
+            cached_fp = (int(cached_fp_raw[0]), int(cached_fp_raw[1]))
+        cached_langs = cached.get("audio_languages")
+        if isinstance(cached_langs, list):
+            audio_languages = [str(x) for x in cached_langs]
+    if fingerprint is not None and fingerprint != cached_fp:
+        # File changed (or first ever probe) — re-run ffprobe and refresh
+        # the cache fields. We re-probe both .mkv and .mp4 so promotion
+        # results are picked up immediately.
+        audio_languages = _probe_audio_languages(video_path)
+
     # Dub present if any of:
     #   - legacy XTTS:  <name>_DOBLADO.mkv/mp4 next to source
-    #   - flujo B v5:   <folder>/doblajes/<name>.mkv
+    #   - flujo B v5:   <folder>/doblajes/<name>.mkv  (pre-promotion)
     #   - Studio E2E:   <folder>/elevenlabs/<source.ext>
+    #   - promoted:     audio_languages contains a Spanish tag
     has_dubbed = (
         any((folder / f"{base}{sfx}").exists() for sfx in _DUB_SUFFIXES)
         or (folder / "doblajes" / f"{base}.mkv").exists()
         or (folder / "elevenlabs" / video_path.name).exists()
+        or _has_spanish_audio(audio_languages)
     )
+
+    # is_promoted: file is the multi-track final form (Spanish embedded AND
+    # no sidecar in doblajes/). Used by the frontend to hide the "Promover"
+    # button on rows that are already done.
+    is_promoted = (
+        _has_spanish_audio(audio_languages)
+        and not (folder / "doblajes" / f"{base}.mkv").exists()
+    )
+
     try:
         size_mb = round(video_path.stat().st_size / (1024 * 1024), 1)
     except OSError:
         size_mb = None
-    return {
+
+    out: dict[str, Any] = {
         "has_subtitles_en": has_srt,
         "has_subtitles_es": has_es_srt,
         "has_dubbing": has_dubbed,
+        "is_promoted": is_promoted,
         "is_chapter": bool(_CHAPTER_RE.search(video_path.name)),
-        **({"size_mb": size_mb} if size_mb is not None else {}),
     }
+    if audio_languages is not None:
+        out["audio_languages"] = audio_languages
+    if fingerprint is not None:
+        out["audio_fingerprint"] = list(fingerprint)
+    if size_mb is not None:
+        out["size_mb"] = size_mb
+    return out
 
 
 def ensure_duration(video: dict[str, Any]) -> None:
@@ -129,7 +230,7 @@ def refresh_instructional_flags(item: dict[str, Any]) -> dict[str, Any]:
         # scans (before the filter was added to scan_library).
         if vp.stem.endswith("_DOBLADO"):
             continue
-        v.update(_video_flags(vp))
+        v.update(_video_flags(vp, cached=v))
         fresh_videos.append(v)
         if v.get("has_subtitles_en"):
             subtitled += 1

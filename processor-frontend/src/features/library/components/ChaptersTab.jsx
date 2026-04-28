@@ -16,6 +16,7 @@ import {
   Scissors,
   Languages,
   RotateCw,
+  Sparkles,
 } from 'lucide-react'
 import {
   Accordion,
@@ -36,6 +37,7 @@ import { toast } from 'sonner'
 import { useRenameChapter, useRenameByOracle } from '../api/useLibrary'
 import { useStartPipeline } from '@/features/pipeline/api/usePipeline'
 import { useStartElevenLabsDubbing, useElevenLabsJob, useStartElevenLabsBatch } from '@/features/elevenlabs/api/useElevenLabsDubbing'
+import { useStartPromote, useStartPromoteSeason } from '../api/usePromote'
 import { useOracleData } from '@/features/oracle/api/useOracle'
 import SubtitleValidationDialog from './SubtitleValidationDialog'
 import SeasonValidationDialog from './SeasonValidationDialog'
@@ -94,8 +96,30 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
   const rename = useRenameChapter()
   const startSplit = useStartPipeline()
   const startElevenLabs = useStartElevenLabsDubbing()
+  const startPromote = useStartPromote()
   const [elevenLabsJobId, setElevenLabsJobId] = useState(null)
   const elevenLabsJob = useElevenLabsJob(elevenLabsJobId)
+
+  const handlePromote = async () => {
+    if (startPromote.isPending) return
+    const msg =
+      `¿Promover «${video.filename}» a archivo final multi-pista?\n\n` +
+      `• Genera <name>.mkv con vídeo + audio ES (default) + audio EN + subs ES/EN\n` +
+      `• BORRA el original, el doblado en doblajes/, y los .srt/.wav/.json sidecars\n` +
+      `• La metadata .bjj-meta.json se conserva\n` +
+      `• Acción irreversible`
+    if (!window.confirm(msg)) return
+    const tid = toast.loading('Promoviendo doblaje…')
+    try {
+      await startPromote.mutateAsync({ videoPath: video.path })
+      toast.success('Doblaje promovido', { id: tid })
+    } catch (e) {
+      const detail = e?.body?.detail
+      const code = typeof detail === 'object' ? detail?.code : null
+      const message = typeof detail === 'object' ? detail?.message : detail || e?.message
+      toast.error(`Promoción falló${code ? ` (${code})` : ''}: ${message || 'error'}`, { id: tid })
+    }
+  }
 
   const handleElevenLabs = async () => {
     if (startElevenLabs.isPending || elevenLabsJobId) return
@@ -152,6 +176,11 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
   const hasSubs = Boolean(video.has_subtitles_en)
   const hasSubsEs = Boolean(video.has_subtitles_es)
   const hasDub = Boolean(video.has_dubbing || video.has_dubbed)
+  const isPromoted = Boolean(video.is_promoted)
+  // Promote button only when dubbing exists AND it's not already in
+  // multi-track form. Also need a doblajes/<name>.mkv on disk — but the
+  // backend enforces that; here we just gate on the cached flags.
+  const canPromote = hasDub && !isPromoted
   // "Ya troceado" = pertenece a una Season válida o tiene código SNNEMM en el nombre.
   const isChaptered =
     Boolean(video.season && video.season !== 'Sin temporada') ||
@@ -286,31 +315,60 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
             {err && <span className="text-[11px] text-red-400">{err}</span>}
           </div>
         ) : (
-          <div className="group flex min-w-0 items-center gap-2">
-            <span
-              className={cn(
-                'truncate text-sm text-zinc-100',
-                video._optimistic && 'opacity-70',
+          <div className="group flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <span
+                className={cn(
+                  'truncate text-sm text-zinc-100',
+                  video._optimistic && 'opacity-70',
+                )}
+                title={video.filename}
+              >
+                {video.filename}
+              </span>
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                aria-label="Renombrar"
+                className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-amber-400"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            {/* Estado inline (solo móvil — la columna Estado se oculta en <sm) */}
+            <div className="flex items-center gap-1.5 sm:hidden">
+              {isChaptered ? (
+                <StatusBadge ok Icon={Scissors} label="Ya troceado" />
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSplit}
+                  disabled={startSplit.isPending}
+                  title="Trocear en capítulos"
+                  className={cn(
+                    'inline-flex h-6 w-6 items-center justify-center rounded',
+                    'bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 disabled:opacity-50',
+                  )}
+                >
+                  {startSplit.isPending ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Scissors className="h-3 w-3" />
+                  )}
+                </button>
               )}
-              title={video.filename}
-            >
-              {video.filename}
-            </span>
-            <button
-              type="button"
-              onClick={() => setEditing(true)}
-              aria-label="Renombrar"
-              className="opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-amber-400"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-            </button>
+              <StatusBadge ok={hasSubs} Icon={Captions} label="Subs EN" />
+              <StatusBadge ok={hasSubsEs} Icon={Languages} label="Subs ES" />
+              <StatusBadge ok={hasDub} Icon={Mic} label="Doblaje ES" />
+              <DubQaBadge videoPath={video.path} enabled={hasDub} />
+            </div>
           </div>
         )}
       </td>
       <td className="hidden sm:table-cell px-3 py-2 text-xs tabular-nums text-zinc-500 shrink-0 whitespace-nowrap">
         {fmtDuration(video.duration)}
       </td>
-      <td className="px-3 py-2">
+      <td className="hidden sm:table-cell px-3 py-2">
         <div className="flex items-center gap-1.5">
           {isChaptered ? (
             <StatusBadge ok Icon={Scissors} label="Ya troceado" />
@@ -383,6 +441,24 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
                 : 'ElevenLabs'}
             </span>
           </Button>
+          {canPromote && (
+            <Button
+              size="sm"
+              variant="ghost"
+              type="button"
+              onClick={handlePromote}
+              disabled={startPromote.isPending}
+              title="Promover doblaje: fusionar a un único .mkv multi-pista y borrar artefactos"
+              className="text-emerald-400 hover:text-emerald-300"
+            >
+              {startPromote.isPending ? (
+                <Loader2 className="h-3 w-3 sm:mr-1 animate-spin" />
+              ) : (
+                <Sparkles className="h-3 w-3 sm:mr-1" />
+              )}
+              <span className="hidden sm:inline">Promover</span>
+            </Button>
+          )}
           <DropdownMenu open={processOpen} onOpenChange={setProcessOpen}>
             <DropdownMenuTrigger asChild>
               <Button size="sm" variant="ghost" onClick={openProcessMenu} title="Procesar capítulo">
@@ -597,6 +673,70 @@ function SeasonRenameOracleButton({ seasonPath, oracle, instructionalName }) {
     </Button>
   )
 }
+
+function SeasonPromoteButton({ seasonPath, list }) {
+  const startPromote = useStartPromoteSeason()
+  const candidates = (list || []).filter(
+    (v) => Boolean(v.has_dubbing || v.has_dubbed) && !v.is_promoted,
+  )
+  const onClick = async (e) => {
+    e.stopPropagation()
+    if (!seasonPath) {
+      toast.error('No se pudo inferir la ruta de la Season')
+      return
+    }
+    if (!candidates.length) {
+      toast.info('No hay capítulos doblados pendientes de promover')
+      return
+    }
+    const msg =
+      `¿Promover ${candidates.length} capítulo(s) doblados de esta Season?\n\n` +
+      `• Fusiona vídeo + audio ES + audio EN + subs ES/EN en un único .mkv\n` +
+      `• Borra originales, doblajes/, .srt, .wav, .json sidecars\n` +
+      `• Procesamiento secuencial. Acción irreversible.`
+    if (!window.confirm(msg)) return
+    const tid = toast.loading(`Promoviendo ${candidates.length} capítulo(s)…`)
+    try {
+      const resp = await startPromote.mutateAsync({ seasonPath })
+      const p = resp?.promoted_count ?? 0
+      const s = resp?.skipped_count ?? 0
+      const f = resp?.failed_count ?? 0
+      const parts = [`${p} promovidos`]
+      if (s) parts.push(`${s} omitidos`)
+      if (f) parts.push(`${f} fallidos`)
+      toast.success(parts.join(' · '), { id: tid, duration: 6000 })
+      if (f > 0 && Array.isArray(resp?.failed)) {
+        const first = resp.failed[0]
+        const detail = first?.message || first?.code
+        if (detail) toast.error(`Primero fallido: ${detail}`, { duration: 8000 })
+      }
+    } catch (err) {
+      toast.error(`Promoción Season falló: ${err?.body?.detail || err?.message || 'error'}`, { id: tid })
+    }
+  }
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={startPromote.isPending || !seasonPath || candidates.length === 0}
+      onClick={onClick}
+      title={
+        candidates.length === 0
+          ? 'No hay capítulos doblados pendientes'
+          : `Promover los ${candidates.length} capítulo(s) doblados`
+      }
+      className="text-emerald-400 hover:text-emerald-300"
+    >
+      {startPromote.isPending ? (
+        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+      ) : (
+        <Sparkles className="mr-1 h-3 w-3" />
+      )}
+      Promover Season {candidates.length > 0 ? `(${candidates.length})` : ''}
+    </Button>
+  )
+}
+
 
 function SeasonElevenLabsButton({ seasonPath, list }) {
   const nav = useNavigate()
@@ -900,6 +1040,7 @@ export default function ChaptersTab({ instructional }) {
                       hasOracle={hasOracle}
                       oracleData={oracleData}
                     />
+                    <SeasonPromoteButton seasonPath={seasonPath} list={list} />
                   </>
                 )}
               </div>
@@ -910,10 +1051,10 @@ export default function ChaptersTab({ instructional }) {
               <table className="w-full">
                 <thead className="bg-zinc-900/40 text-xs uppercase tracking-wide text-zinc-500">
                   <tr>
-                    <th className="px-3 py-2 text-left font-medium w-20">Código</th>
+                    <th className="px-3 py-2 text-left font-medium w-16 sm:w-20">Código</th>
                     <th className="px-3 py-2 text-left font-medium">Título</th>
                     <th className="hidden sm:table-cell px-3 py-2 text-left font-medium w-20 whitespace-nowrap">Duración</th>
-                    <th className="px-3 py-2 text-left font-medium w-28">Estado</th>
+                    <th className="hidden sm:table-cell px-3 py-2 text-left font-medium w-28">Estado</th>
                     <th className="px-3 py-2 text-right font-medium w-auto whitespace-nowrap">Acción</th>
                   </tr>
                 </thead>

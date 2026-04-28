@@ -182,6 +182,7 @@ from api.health_proxy import router as health_proxy_router  # noqa: E402
 from api.subtitles import router as subtitles_router  # noqa: E402
 from api.dubbing import router as dubbing_router  # noqa: E402
 from api.elevenlabs_dubbing import router as elevenlabs_dubbing_router  # noqa: E402
+from api.promote import router as promote_router  # noqa: E402
 # WIRE_ORACLE_ROUTER
 from api import oracle as oracle_module  # noqa: E402
 # WIRE_TELEGRAM_ROUTER
@@ -205,6 +206,7 @@ app.include_router(health_proxy_router)
 app.include_router(subtitles_router)
 app.include_router(dubbing_router)
 app.include_router(elevenlabs_dubbing_router)
+app.include_router(promote_router)
 # WIRE_ORACLE_ROUTER
 app.include_router(oracle_module.router)
 # WIRE_TELEGRAM_ROUTER
