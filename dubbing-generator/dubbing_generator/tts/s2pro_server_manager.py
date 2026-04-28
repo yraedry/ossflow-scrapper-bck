@@ -66,11 +66,11 @@ class S2ProServerManager:
         return self._ready.wait(timeout=timeout)
 
     def start(self) -> None:
-        # Idempotent: in batch jobs (process_directory) start() is called
-        # per episode but we want to share the running server across all
-        # episodes — booting once amortizes the ~10s GGUF mmap. If the
-        # process is alive, just return; the readiness Event still
-        # holds from the original start.
+        # Idempotent: safe to call when the process is already alive (returns
+        # immediately). The pipeline calls start() at fase 3 of each file and
+        # stop() right after fase 6, so on a 6 GB card Demucs of file N+1 has
+        # the GPU to itself. The OS keeps the GGUF in page cache so re-mmap
+        # between files is ~2-3 s, not the cold-start ~10 s.
         if self._process is not None and self._process.poll() is None:
             logger.debug("S2-Pro server already running (pid=%s)",
                          self._process.pid)

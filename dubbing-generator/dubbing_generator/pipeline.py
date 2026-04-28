@@ -273,6 +273,14 @@ class DubbingPipeline:
         self._report(5, 6, "Muxing final video...")
         self._mux_video(video_path, output_audio, output_video)
 
+        # Stop s2.cpp server now — Demucs of the next episode (process_directory
+        # batch mode) cannot share VRAM with a 4.4 GB GGUF residing on a 6 GB
+        # card. The server is re-booted at fase 3 of the next file. Re-mmap is
+        # cheap (~2-3s) since the GGUF stays in OS page cache.
+        if self._s2pro_manager is not None and self.cfg.tts_engine == "s2pro":
+            logger.info("Stopping s2.cpp server (release VRAM for next file)...")
+            self._s2pro_manager.stop()
+
         # 7. QA — boundary metrics over the TTS-only timeline (no background
         # interference) plus UTMOS over the final mixed wav. Best-effort:
         # failures here never abort the dub.

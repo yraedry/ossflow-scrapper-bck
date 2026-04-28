@@ -128,8 +128,10 @@ def _get_model():
             trust_repo=True,
         )
         _MODEL.eval()
-        if torch.cuda.is_available():
-            _MODEL = _MODEL.cuda()
+        # CPU-only by design. UTMOS is a tiny model (~100 MB) and runs in ~5s
+        # per clip on CPU. On 6 GB cards (RTX 2060) the GPU is already saturated
+        # by Demucs/S2-Pro/voice cloner during a dubbing job — pinning UTMOS to
+        # CUDA causes OOM on the QA fase. CPU keeps QA strictly best-effort.
         logger.info("UTMOS22 loaded (device=%s)", next(_MODEL.parameters()).device)
         return _MODEL
     except Exception as exc:
