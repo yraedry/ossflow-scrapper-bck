@@ -1479,6 +1479,7 @@ function MaintenanceSection() {
   const libraryPath = settings?.library_path || ''
   const [busy, setBusy] = useState(false)
   const [restarting, setRestarting] = useState(false)
+  const [restartingDubbing, setRestartingDubbing] = useState(false)
   const [pulling, setPulling] = useState(false)
   const [pullPct, setPullPct] = useState(null)
   const [pullStatus, setPullStatus] = useState('')
@@ -1561,6 +1562,22 @@ function MaintenanceSection() {
     }
   }
 
+  const restartDubbing = async () => {
+    setRestartingDubbing(true)
+    try {
+      await http.post('/dubbing/maintenance/restart', {})
+      toast.success('Dubbing Generator reiniciando…', {
+        description: 'Volverá a estar disponible en ~15 segundos.',
+      })
+    } catch (e) {
+      toast.success('Dubbing Generator reiniciando…', {
+        description: 'Volverá a estar disponible en ~15 segundos.',
+      })
+    } finally {
+      setTimeout(() => setRestartingDubbing(false), 15000)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <Card>
@@ -1609,6 +1626,19 @@ function MaintenanceSection() {
             <Button onClick={restartSubtitles} disabled={restarting} variant="outline" size="sm" className="shrink-0">
               {restarting ? <Loader2 className="mr-2 animate-spin" size={14} /> : <RefreshCw className="mr-2" size={14} />}
               {restarting ? 'Reiniciando…' : 'Reiniciar'}
+            </Button>
+          </div>
+          <div className="flex items-start justify-between gap-4 rounded-md border border-border/60 p-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Liberar VRAM (reiniciar Dubbing Generator)</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Reinicia el servicio de doblaje para liberar la VRAM tras un OOM o cancelación de job.
+                Mata también el server S2-Pro residente. El contenedor vuelve solo en ~15 segundos.
+              </p>
+            </div>
+            <Button onClick={restartDubbing} disabled={restartingDubbing} variant="outline" size="sm" className="shrink-0">
+              {restartingDubbing ? <Loader2 className="mr-2 animate-spin" size={14} /> : <RefreshCw className="mr-2" size={14} />}
+              {restartingDubbing ? 'Reiniciando…' : 'Reiniciar'}
             </Button>
           </div>
           <div className="flex items-start justify-between gap-4 rounded-md border border-border/60 p-4">

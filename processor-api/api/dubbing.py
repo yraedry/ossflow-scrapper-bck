@@ -173,6 +173,19 @@ def get_instructional_qa(name: str) -> dict:
     return {"name": name, "summary": summary, "chapters": chapters}
 
 
+@router.post("/maintenance/restart")
+async def restart_dubbing_service() -> dict:
+    """Proxy graceful restart to dubbing-generator (releases VRAM, Docker restarts container)."""
+    # The container kills its own PID 1 ~0.5 s after replying. Use a short
+    # timeout so we tolerate the connection dropping mid-response without
+    # bubbling up a 502 to the user.
+    try:
+        return await _post("/maintenance/restart", {}, timeout=5.0)
+    except HTTPException:
+        # Container went down before responding — that's the success path.
+        return {"ok": True, "message": "Reiniciando dubbing-generator…"}
+
+
 @router.post("/analyze")
 async def analyze_dubbing(body: AnalyzeBody) -> dict:
     payload: dict = {

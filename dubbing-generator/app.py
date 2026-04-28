@@ -268,6 +268,21 @@ def _stop_s2pro_server() -> None:
 app.router.on_shutdown.append(_stop_s2pro_server)
 
 
+@app.post("/maintenance/restart")
+def restart_service() -> dict:
+    """Graceful self-restart: libera VRAM y reinicia el proceso.
+
+    Docker reinicia el contenedor automáticamente (restart: unless-stopped).
+    Útil para liberar VRAM tras un OOM o cancelación de job — el s2.cpp
+    server hijo sigue al PID 1 al recibir SIGTERM.
+    """
+    import threading, os, signal
+    # Kill PID 1 (entrypoint) so Docker restarts the container. Killing only
+    # os.getpid() (worker) leaves the entrypoint alive without a worker.
+    threading.Timer(0.5, lambda: os.kill(1, signal.SIGTERM)).start()
+    return {"ok": True, "message": "Reiniciando dubbing-generator…"}
+
+
 @app.get("/s2pro/status")
 def s2pro_status() -> dict:
     """Report whether the S2-Pro subprocess is running and ready.
