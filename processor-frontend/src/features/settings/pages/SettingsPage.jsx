@@ -614,6 +614,79 @@ function TtsSection({ settings }) {
 
   const engine = form.watch('tts_engine')
   const kokoroVoice = form.watch('kokoro_voice')
+  const currentS2Voice = form.watch('s2_voice_profile')
+
+  // Load available voice WAVs from dubbing-generator. Each entry carries
+  // the transcript sidecar so changing the dropdown can pre-fill the
+  // reference text — no more retyping per voice.
+  const [voices, setVoices] = useState([])
+  const [voicesLoading, setVoicesLoading] = useState(false)
+  const [savingTranscript, setSavingTranscript] = useState(false)
+  const reloadVoices = async () => {
+    setVoicesLoading(true)
+    try {
+      const r = await http.get('/dubbing/voices')
+      setVoices(Array.isArray(r?.voices) ? r.voices : [])
+    } catch (e) {
+      // Backend may be down at first paint — silent fail; user can retry.
+    } finally {
+      setVoicesLoading(false)
+    }
+  }
+  useEffect(() => {
+    if (engine === 's2pro') reloadVoices()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engine])
+
+  // First-load convenience: if the saved settings have an empty
+  // s2_ref_text but the selected voice has a sidecar transcript, fill
+  // it in. We only do this when the field is genuinely empty so we
+  // never overwrite text the user typed in but hasn't saved.
+  useEffect(() => {
+    if (engine !== 's2pro') return
+    const cur = form.getValues('s2_ref_text')
+    if (cur && cur.trim().length > 0) return
+    const v = voices.find((x) => x.id === currentS2Voice)
+    if (v && v.transcript) {
+      form.setValue('s2_ref_text', v.transcript, { shouldDirty: false })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voices, currentS2Voice, engine])
+
+  // When the user switches voices, auto-fill the reference transcript
+  // from the sidecar (if any) so they don't have to retype it.
+  const onVoiceChange = (filename) => {
+    form.setValue('s2_voice_profile', filename, { shouldDirty: true })
+    const v = voices.find((x) => x.id === filename)
+    if (v && typeof v.transcript === 'string' && v.transcript.length > 0) {
+      form.setValue('s2_ref_text', v.transcript, { shouldDirty: true })
+    }
+  }
+
+  const saveTranscriptForCurrentVoice = async () => {
+    const filename = form.getValues('s2_voice_profile')
+    const transcript = form.getValues('s2_ref_text') || ''
+    if (!filename) {
+      toast.error('Selecciona primero un perfil de voz')
+      return
+    }
+    setSavingTranscript(true)
+    try {
+      await http.put(
+        `/dubbing/voices/${encodeURIComponent(filename)}/transcript`,
+        { transcript },
+      )
+      toast.success('Transcripción guardada junto al WAV')
+      // Refresh local cache so future selections see the new value.
+      await reloadVoices()
+    } catch (e) {
+      toast.error('No se pudo guardar la transcripción', {
+        description: e?.message || 'Error',
+      })
+    } finally {
+      setSavingTranscript(false)
+    }
+  }
 
   const onSubmit = async (values) => {
     try {
@@ -716,19 +789,73 @@ function TtsSection({ settings }) {
           {engine === 's2pro' && (
             <>
               <div>
-                <Label htmlFor="s2_voice_profile">Perfil de voz (archivo en /voices)</Label>
-                <Input
-                  id="s2_voice_profile"
-                  placeholder="voice_martin_osborne_24k.wav"
-                  {...form.register('s2_voice_profile')}
-                  className="mt-1.5 font-mono"
-                />
+                <div className="flex items-end justify-between gap-2">
+                  <Label htmlFor="s2_voice_profile">Perfil de voz (archivo en /voices)</Label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={reloadVoices}
+                    disabled={voicesLoading}
+                    className="h-7 gap-1 text-xs"
+                  >
+                    {voicesLoading
+                      ? <Loader2 size={12} className="animate-spin" />
+                      : <RefreshCw size={12} />}
+                    Recargar
+                  </Button>
+                </div>
+                <Select
+                  value={currentS2Voice}
+                  onValueChange={onVoiceChange}
+                >
+                  <SelectTrigger id="s2_voice_profile" className="mt-1.5 font-mono">
+                    <SelectValue placeholder={
+                      voicesLoading
+                        ? 'Cargando voces…'
+                        : (voices.length === 0 ? 'No se encontraron voces en /voices' : 'Selecciona un perfil')
+                    } />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {voices.map((v) => (
+                      <SelectItem key={v.id} value={v.id} className="font-mono">
+                        {v.id}
+                        {v.transcript ? '' : '  (sin transcripción)'}
+                      </SelectItem>
+                    ))}
+                    {/* Fallback: show the current value even if it's not on disk
+                        (e.g. user typed a path manually on a previous version).
+                        Otherwise the Select would show the placeholder and look
+                        like the setting got lost. */}
+                    {currentS2Voice && !voices.some((v) => v.id === currentS2Voice) && (
+                      <SelectItem value={currentS2Voice} className="font-mono">
+                        {currentS2Voice}  (no presente en /voices)
+                      </SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Nombre del archivo WAV (16-24 kHz mono, 5-30 s) dentro del directorio bind-mounted en <code>/voices</code>.
+                  WAV (16-24 kHz mono, 5-30 s) en el directorio bind-mounted <code>/voices</code>.
+                  Cada voz puede llevar un sidecar <code>.txt</code> con su transcripción.
                 </p>
               </div>
               <div>
-                <Label htmlFor="s2_ref_text">Transcripción de referencia</Label>
+                <div className="flex items-end justify-between gap-2">
+                  <Label htmlFor="s2_ref_text">Transcripción de referencia</Label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={saveTranscriptForCurrentVoice}
+                    disabled={savingTranscript || !currentS2Voice}
+                    className="h-7 gap-1 text-xs"
+                  >
+                    {savingTranscript
+                      ? <Loader2 size={12} className="animate-spin" />
+                      : <Save size={12} />}
+                    Guardar transcripción
+                  </Button>
+                </div>
                 <textarea
                   id="s2_ref_text"
                   rows={3}
@@ -737,6 +864,7 @@ function TtsSection({ settings }) {
                 />
                 <p className="text-xs text-muted-foreground mt-1">
                   Debe coincidir EXACTAMENTE con lo que se dice en el WAV. La discrepancia colapsa la calidad de clonación.
+                  Al cambiar de voz se autocompleta con su transcripción guardada (si tiene sidecar).
                 </p>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

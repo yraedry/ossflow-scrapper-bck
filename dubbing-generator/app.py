@@ -308,6 +308,25 @@ def s2pro_status() -> dict:
 VOICES_DIR = Path("/voices")
 
 
+def _transcript_path_for(voice_path: Path) -> Path:
+    """Return the sidecar .txt that holds the reference transcript.
+
+    Stored next to the WAV with the same stem so moving voices around
+    keeps the transcript paired with the audio without a database.
+    """
+    return voice_path.with_suffix(".txt")
+
+
+def _read_transcript(voice_path: Path) -> str:
+    sidecar = _transcript_path_for(voice_path)
+    if not sidecar.exists():
+        return ""
+    try:
+        return sidecar.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 @app.get("/voices")
 def list_voices() -> dict:
     """List WAV files available under /voices as selectable voice profiles.
@@ -315,6 +334,10 @@ def list_voices() -> dict:
     Operators drop files in ``dubbing-generator/voices/`` (mounted to
     ``/voices`` inside the container). The UI lets users pick one per
     instructional; the chosen path is passed as ``model_voice_path``.
+    Each voice may have a ``<stem>.txt`` sidecar with its reference
+    transcription — when present we return it so the UI can pre-fill
+    the s2_ref_text field instead of forcing the user to retype it
+    every time they switch voices.
     """
     voices: list[dict] = []
     if VOICES_DIR.exists():
@@ -324,8 +347,31 @@ def list_voices() -> dict:
                     "id": p.name,
                     "path": str(p),
                     "size_bytes": p.stat().st_size,
+                    "transcript": _read_transcript(p),
                 })
     return {"voices": voices}
+
+
+class _TranscriptBody(BaseModel):
+    transcript: str
+
+
+@app.put("/voices/{filename}/transcript")
+def save_voice_transcript(filename: str, body: _TranscriptBody) -> dict:
+    """Persist the reference transcription for a given voice file.
+
+    The transcript is written to ``<voice_stem>.txt`` next to the WAV
+    so it travels with the voice file. Path traversal is rejected.
+    """
+    # Reject any path component — only bare filenames inside /voices.
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid filename")
+    voice_path = VOICES_DIR / filename
+    if not voice_path.exists() or not voice_path.is_file():
+        raise HTTPException(status_code=404, detail="voice not found")
+    sidecar = _transcript_path_for(voice_path)
+    sidecar.write_text((body.transcript or "").strip() + "\n", encoding="utf-8")
+    return {"ok": True, "voice": filename, "transcript_path": str(sidecar)}
 
 
 # ======================================================================
