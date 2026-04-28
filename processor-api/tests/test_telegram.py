@@ -412,11 +412,19 @@ def test_settings_accepts_telegram_credentials(env):
     )
     assert r.status_code == 200
     body = r.json()
+    # PUT echoes the unmasked value back so the frontend's optimistic update
+    # has the real hash without an extra round-trip.
     assert body["telegram_api_id"] == 123456
     assert body["telegram_api_hash"] == "a" * 32
 
-    # GET returns them too
+    # Public GET masks the hash to avoid leaking it to the browser.
     r = client.get("/api/settings")
+    assert r.status_code == 200
+    assert r.json()["telegram_api_id"] == 123456
+    assert r.json()["telegram_api_hash"] == "***"
+
+    # The internal endpoint (used by telegram-fetcher) returns the real hash.
+    r = client.get("/api/settings/internal")
     assert r.status_code == 200
     assert r.json()["telegram_api_id"] == 123456
     assert r.json()["telegram_api_hash"] == "a" * 32

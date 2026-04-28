@@ -223,6 +223,33 @@ async def get_settings():
     return _mask_secrets(load_settings())
 
 
+@router.get("/internal")
+async def get_settings_internal(request: Request):
+    """Unmasked settings for in-stack service-to-service calls.
+
+    Telegram-fetcher needs the real ``telegram_api_hash`` to call the
+    Telethon API; it cannot use the public masked endpoint (would send
+    "***" to Telegram → ApiIdInvalidError). Restricted to private Docker
+    network ranges so it can never be reached from the host browser.
+    """
+    client_host = request.client.host if request.client else ""
+    # Docker bridge networks live in 172.16.0.0/12 (default) or 10.x for
+    # custom networks. Loopback is allowed for local dev / curl from
+    # processor-api's own container.
+    allowed = (
+        client_host.startswith("172.")
+        or client_host.startswith("10.")
+        or client_host.startswith("192.168.")
+        or client_host in ("127.0.0.1", "localhost", "::1", "testclient")
+    )
+    if not allowed:
+        return JSONResponse(
+            {"error": "internal endpoint, network-restricted"},
+            status_code=403,
+        )
+    return load_settings()
+
+
 @router.put("")
 async def put_settings(request: Request):
     body = await request.json()

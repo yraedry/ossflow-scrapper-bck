@@ -97,7 +97,11 @@ class Config:
 
         Never raises on transport or HTTP error — logs and returns ``None``.
         """
-        url = f"{self.processor_api_url}/api/settings"
+        # /internal returns secrets unmasked (network-restricted to the
+        # private Docker subnet). The public /api/settings replaces
+        # telegram_api_hash with "***" for the frontend, which would make
+        # Telethon raise ApiIdInvalidError.
+        url = f"{self.processor_api_url}/api/settings/internal"
         try:
             async with self._http_client_factory() as client:
                 resp = await client.get(url)
