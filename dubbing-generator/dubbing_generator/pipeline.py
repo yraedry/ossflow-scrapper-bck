@@ -219,7 +219,9 @@ class DubbingPipeline:
                     "circuit breaker.",
                     self.cfg.s2_health_timeout_s,
                 )
-            self.synthesizer = build_synthesizer(self.cfg)
+            self.synthesizer = build_synthesizer(
+                self.cfg, server_manager=self._s2pro_manager,
+            )
 
         tts_segments = self._synthesize_all(
             planned, ref_wav,

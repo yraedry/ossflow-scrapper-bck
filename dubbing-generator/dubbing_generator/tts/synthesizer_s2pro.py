@@ -34,7 +34,7 @@ _BREAKER_COOLDOWN_S = 60.0
 class SynthesizerS2Pro:
     """Generate speech via the local s2.cpp HTTP server."""
 
-    def __init__(self, config: DubbingConfig) -> None:
+    def __init__(self, config: DubbingConfig, server_manager=None) -> None:
         self.cfg = config
         self._client = httpx.Client(
             base_url=f"http://{config.s2_server_host}:{config.s2_server_port}",
@@ -42,6 +42,13 @@ class SynthesizerS2Pro:
         )
         self._consecutive_failures = 0
         self._breaker_open_until: float = 0.0
+        # Optional: lifecycle manager. When present we can resurrect the
+        # server after a crash mid-job (s2.cpp occasionally dies after
+        # generating long outputs — observed on phrases ≥400 frames).
+        self._manager = server_manager
+        # Set to True after a connection failure so the next request that
+        # bypasses the breaker forces a server restart before retrying.
+        self._needs_restart = False
 
     @property
     def sample_rate(self) -> int:
@@ -83,6 +90,18 @@ class SynthesizerS2Pro:
             logger.error("S2-Pro ref audio missing: %s", ref_path)
             return AudioSegment.silent(duration=200)
 
+        # Server-down recovery: if we've previously seen a connection-level
+        # failure, the s2.cpp subprocess almost certainly died. Try to bring
+        # it back BEFORE issuing the POST — otherwise we'd waste another
+        # failure increment hitting a dead socket.
+        if self._needs_restart and self._manager is not None:
+            if self._try_restart():
+                self._needs_restart = False
+                self._consecutive_failures = 0
+                self._breaker_open_until = 0.0
+            # If restart failed we fall through; the breaker logic below
+            # handles the inevitable connection error.
+
         # Circuit breaker check.
         now = time.monotonic()
         if now < self._breaker_open_until:
@@ -112,6 +131,11 @@ class SynthesizerS2Pro:
                 )
             resp.raise_for_status()
         except httpx.HTTPError as exc:
+            # Connection-level errors (refused, disconnected) almost always
+            # mean the server died — flag for resurrection on next call.
+            msg = str(exc)
+            if "Connection refused" in msg or "disconnected" in msg.lower():
+                self._needs_restart = True
             self._consecutive_failures += 1
             if self._consecutive_failures >= _BREAKER_THRESHOLD:
                 self._breaker_open_until = now + _BREAKER_COOLDOWN_S
@@ -123,14 +147,44 @@ class SynthesizerS2Pro:
                 # Reset counter on trip so post-cooldown probe gets a clean
                 # baseline; a single failure after cooldown re-trips immediately.
                 self._consecutive_failures = 0
-            logger.warning("S2-Pro synthesize failed (text=%r): %s",
-                           text[:80], exc)
+            logger.error("S2-Pro synthesize failed (text=%r): %s",
+                         text[:80], exc)
             return AudioSegment.silent(duration=200)
 
         self._consecutive_failures = 0
+        self._needs_restart = False
         try:
             return AudioSegment.from_file(io.BytesIO(resp.content), format="wav")
         except Exception as exc:  # noqa: BLE001
             logger.warning("S2-Pro returned undecodable audio (%r): %s",
                            text[:80], exc)
             return AudioSegment.silent(duration=200)
+
+    def _try_restart(self) -> bool:
+        """Restart the s2.cpp server after a crash. Returns True on success.
+
+        Called from inside ``generate`` when a connection error suggests the
+        subprocess died. Best-effort: if the manager fails to bring it back
+        we keep the breaker closed so the rest of the job degrades to
+        silence rather than spending its time re-crashing the GPU.
+        """
+        if self._manager is None:
+            return False
+        try:
+            logger.error("S2-Pro server appears dead — attempting restart")
+            self._manager.stop()
+            self._manager.start()
+            ok = self._manager.wait_until_ready(
+                timeout=self.cfg.s2_health_timeout_s,
+            )
+            if ok:
+                logger.info("S2-Pro server restarted successfully")
+                return True
+            logger.error(
+                "S2-Pro server failed to come back up within %.0f s",
+                self.cfg.s2_health_timeout_s,
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("S2-Pro restart raised: %s", exc)
+            return False

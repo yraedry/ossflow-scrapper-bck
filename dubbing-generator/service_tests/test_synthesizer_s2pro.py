@@ -94,6 +94,40 @@ def test_close_closes_client():
         close.assert_called_once()
 
 
+def test_resurrects_server_after_connection_refused(tmp_path: Path):
+    """When the s2.cpp subprocess dies mid-job (Connection refused / Server
+    disconnected), the synthesizer should ask its manager to restart the
+    server before the next phrase, rather than burning the whole 60-second
+    breaker cooldown emitting silence."""
+    import httpx
+    ref = tmp_path / "ref.wav"; ref.write_bytes(b"\0" * 16)
+    cfg = DubbingConfig(tts_engine="s2pro", s2_ref_audio_path=str(ref))
+
+    manager = MagicMock()
+    manager.wait_until_ready.return_value = True
+    s = SynthesizerS2Pro(cfg, server_manager=manager)
+
+    fake_wav = _wav_bytes(duration_ms=400)
+    fake_resp = MagicMock(); fake_resp.status_code = 200
+    fake_resp.content = fake_wav; fake_resp.raise_for_status = lambda: None
+
+    # First call: server crashed mid-response. Synth records _needs_restart.
+    # Second call: synth notices the flag, restarts via manager, then succeeds.
+    side_effects = [
+        httpx.RemoteProtocolError("Server disconnected without sending a response"),
+        fake_resp,
+    ]
+    with patch.object(s._client, "post", side_effect=side_effects):
+        first = s.generate("frase larga que crashea", reference_wav=ref)
+        second = s.generate("frase siguiente que ya va bien", reference_wav=ref)
+
+    assert len(first) == 200, "first call returns silence on disconnect"
+    assert manager.stop.called, "manager.stop must be called before restart"
+    assert manager.start.called, "manager.start must be called to revive"
+    assert isinstance(second, AudioSegment)
+    assert 350 <= len(second) <= 450, "second call produces real audio"
+
+
 def test_circuit_breaker_opens_after_consecutive_failures(tmp_path: Path):
     """After 3 consecutive HTTP errors, the synthesizer fails fast for 1
     minute rather than hammering the server."""
