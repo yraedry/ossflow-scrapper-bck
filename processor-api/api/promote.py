@@ -259,6 +259,7 @@ def _run_ffmpeg(argv: list[str]) -> None:
         })
     if r.returncode != 0:
         tail = (r.stderr or "").strip().splitlines()[-15:]
+        log.error("ffmpeg failed (rc=%d):\n%s", r.returncode, "\n".join(tail))
         raise HTTPException(status_code=500, detail={
             "code": "ffmpeg_failed",
             "message": "ffmpeg returned non-zero",
@@ -285,7 +286,7 @@ def _promote_one(original_path: str) -> dict:
     season = inp.original.parent
     with _season_lock(season):
         argv = _build_ffmpeg_argv(inp)
-        log.info("Promoting %s → %s", inp.dubbed.name, inp.output.name)
+        log.info("Promoting %s → %s  cmd: %s", inp.dubbed.name, inp.output.name, " ".join(argv))
         try:
             _run_ffmpeg(argv)
             # Atomic swap: replace any leftover temp first (we already verified

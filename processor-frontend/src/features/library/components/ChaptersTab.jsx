@@ -117,7 +117,11 @@ function ChapterRow({ video, instructionalName, onNext, hasOracle }) {
       const detail = e?.body?.detail
       const code = typeof detail === 'object' ? detail?.code : null
       const message = typeof detail === 'object' ? detail?.message : detail || e?.message
-      toast.error(`Promoción falló${code ? ` (${code})` : ''}: ${message || 'error'}`, { id: tid })
+      const stderr = Array.isArray(detail?.stderr_tail) ? detail.stderr_tail.join('\n') : null
+      toast.error(
+        `Promoción falló${code ? ` (${code})` : ''}: ${message || 'error'}${stderr ? `\n${stderr}` : ''}`,
+        { id: tid, duration: 12000 },
+      )
     }
   }
 
@@ -712,7 +716,11 @@ function SeasonPromoteButton({ seasonPath, list }) {
       if (f > 0 && Array.isArray(resp?.failed)) {
         const first = resp.failed[0]
         const detail = first?.message || first?.code
-        if (detail) toast.error(`Primero fallido: ${detail}`, { duration: 8000 })
+        const stderr = Array.isArray(first?.stderr_tail) ? first.stderr_tail.join('\n') : null
+        if (detail) toast.error(
+          `Primero fallido: ${detail}${stderr ? `\n${stderr}` : ''}`,
+          { duration: 12000 },
+        )
       }
     } catch (err) {
       toast.error(`Promoción Season falló: ${err?.body?.detail || err?.message || 'error'}`, { id: tid })
