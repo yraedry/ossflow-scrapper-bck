@@ -317,8 +317,20 @@ class DubbingPipeline:
         return output_video
 
     def process_directory(self, root_dir: Path) -> list[Path]:
-        """Process all videos in *root_dir* that have matching SRT files."""
+        """Process all videos in *root_dir* that have matching SRT files.
+
+        Strict mode (since 2026-04-29 fix): if any chapter is silently
+        missing — either because no ES SRT exists for it OR because TTS
+        raised — we raise ``RuntimeError`` after the loop with a summary.
+        Previously a logged warning + continue meant a partial Season
+        (e.g. 4/9 chapters dubbed) was reported as ``completed`` to the
+        orchestrator, which is the worst-case failure mode: the user
+        thinks the Season is done.
+        """
         results: list[Path] = []
+        chapters_missing_srt: list[str] = []
+        chapters_failed: list[tuple[str, str]] = []  # (name, error)
+        total_chapters = 0
 
         for dirpath, dirs, files in os.walk(root_dir):
             # Skip artefact folders so we never re-process our own outputs.
@@ -333,6 +345,7 @@ class DubbingPipeline:
                 and "_DOBLADO" not in f
             )
             for video_name in videos:
+                total_chapters += 1
                 video_path = Path(dirpath) / video_name
                 base = video_path.with_suffix("")
 
@@ -347,6 +360,7 @@ class DubbingPipeline:
                         break
                 if srt_path is None:
                     logger.warning("No SRT found for %s, skipping", video_name)
+                    chapters_missing_srt.append(video_name)
                     continue
 
                 logger.info("Using ES SRT: %s", srt_path.name)
@@ -354,8 +368,32 @@ class DubbingPipeline:
                 try:
                     out = self.process_file(video_path, srt_path)
                     results.append(out)
-                except Exception:
+                except Exception as exc:
                     logger.exception("Error processing %s", video_name)
+                    chapters_failed.append((video_name, str(exc)))
+
+        # Strict accounting: every chapter must end up either in results or
+        # in one of the failure lists. If anything failed, raise so the
+        # orchestrator marks the step FAILED rather than COMPLETED.
+        if chapters_missing_srt or chapters_failed:
+            parts = []
+            if chapters_missing_srt:
+                parts.append(
+                    f"{len(chapters_missing_srt)} sin SRT ES: "
+                    + ", ".join(chapters_missing_srt[:5])
+                    + (" …" if len(chapters_missing_srt) > 5 else "")
+                )
+            if chapters_failed:
+                parts.append(
+                    f"{len(chapters_failed)} fallaron TTS: "
+                    + ", ".join(name for name, _ in chapters_failed[:5])
+                    + (" …" if len(chapters_failed) > 5 else "")
+                )
+            summary = (
+                f"Dubbing incompleto: {len(results)}/{total_chapters} chapters doblados. "
+                + " | ".join(parts)
+            )
+            raise RuntimeError(summary)
 
         return results
 

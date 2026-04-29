@@ -399,6 +399,15 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
                 f"per-slot char budgets while keeping original SRT timestamps"
             }))
 
+        # Strict accounting (since 2026-04-29): un SRT que no se traduce
+        # NI por primary NI por fallback antes se loggeaba "ERROR" y el
+        # job seguía como success. Eso dejaba la Season con M/N .es.srt y
+        # el dubbing posterior dobla solo los M y reportaba completed →
+        # el usuario veía "4/9 episodios doblados" sin notificación. Ahora
+        # acumulamos errores y al final del bucle hacemos raise para que
+        # el step termine FAILED.
+        failed: list[tuple[str, str]] = []  # (srt_name, error)
+
         for i, srt in enumerate(srts, 1):
             # Single target — the literal .es.srt. In dubbing_mode the text is
             # compacted to each SRT slot's char budget (still anchored to the
@@ -419,6 +428,8 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
             if sub_out.exists():
                 emit(JobEvent(type="log", data={"message": f"skip subs (exists): {sub_out.name}"}))
             elif dubbing_mode:
+                last_err: str | None = None
+                ok = False
                 try:
                     # force_slot_mode=False → use speech-anchored level 3 when
                     # a .words.json exists (real pause-based segmentation for
@@ -429,7 +440,9 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
                     emit(JobEvent(type="log", data={"message":
                         f"translated subs (dub-compact): {srt.name} -> {sub_out.name}"
                     }))
+                    ok = True
                 except Exception as exc:
+                    last_err = f"{provider_name}: {exc}"
                     emit(JobEvent(type="log", data={"message":
                         f"{provider_name} dub-compact failed on {srt.name}: {exc}"
                     }))
@@ -446,15 +459,23 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
                                 emit(JobEvent(type="log", data={"message":
                                     f"translated subs via fallback {fb_name} (literal): {srt.name}"
                                 }))
+                            ok = True
                         except Exception as exc2:
+                            last_err = f"{provider_name}: {exc} | {fb_name}: {exc2}"
                             emit(JobEvent(type="log", data={"message":
                                 f"ERROR fallback {fb_name} also failed on {srt.name}: {exc2}"
                             }))
+                if not ok:
+                    failed.append((srt.name, last_err or "unknown"))
             else:
+                last_err: str | None = None
+                ok = False
                 try:
                     primary.translate_srt(srt, sub_out)
                     emit(JobEvent(type="log", data={"message": f"translated subs: {srt.name} -> {sub_out.name}"}))
+                    ok = True
                 except Exception as exc:
+                    last_err = f"{provider_name}: {exc}"
                     emit(JobEvent(type="log", data={"message":
                         f"{provider_name} failed on {srt.name}: {exc}"
                     }))
@@ -464,13 +485,26 @@ def _run_translate_directory(req: RunRequest, emit) -> None:
                             emit(JobEvent(type="log", data={"message":
                                 f"translated subs via fallback {fb_name}: {srt.name}"
                             }))
+                            ok = True
                         except Exception as exc2:
+                            last_err = f"{provider_name}: {exc} | {fb_name}: {exc2}"
                             emit(JobEvent(type="log", data={"message":
                                 f"ERROR fallback {fb_name} also failed on {srt.name}: {exc2}"
                             }))
+                if not ok:
+                    failed.append((srt.name, last_err or "unknown"))
 
             pct = int(i * 100 / total)
             emit(JobEvent(type="progress", data={"pct": pct}))
+
+        if failed:
+            names = ", ".join(name for name, _ in failed[:5])
+            if len(failed) > 5:
+                names += " …"
+            raise RuntimeError(
+                f"Traducción incompleta: {total - len(failed)}/{total} OK, "
+                f"{len(failed)} fallaron: {names}"
+            )
 
 
 def _hf_cache_root() -> Path:

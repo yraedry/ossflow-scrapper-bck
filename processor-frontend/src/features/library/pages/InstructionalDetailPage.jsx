@@ -3,7 +3,7 @@
 // Detalle de instructional: hero (póster + CTAs) + tabs (Capítulos / Pipeline
 // / Metadatos / Logs / Oracle). La pestaña activa se persiste en el search
 // param `?tab=…` para compartir URL.
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, AlertCircle } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -11,7 +11,6 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from 'sonner'
 import { useInstructional } from '@/features/library/api/useLibrary'
-import { useStartPipeline } from '@/features/pipeline/api/usePipeline'
 import InstructionalHero from '@/features/library/components/InstructionalHero'
 import ChaptersTab from '@/features/library/components/ChaptersTab'
 import MetadataTab from '@/features/library/components/MetadataTab'
@@ -61,21 +60,7 @@ export default function InstructionalDetailPage() {
   }
 
   const { data, isLoading, isError, error } = useInstructional(name)
-  const startPipeline = useStartPipeline()
   const [starting, setStarting] = useState(false)
-
-  // AbortController compartido entre el polling de pipelines y fetches.
-  // Si el usuario navega fuera mientras ``waitForPipeline`` aún itera,
-  // el ciclo ``while (true)`` seguía corriendo y el fetch podía escribir
-  // state en un componente desmontado → warning de React + leak de
-  // promesa. El ref se aborta en el cleanup del useEffect.
-  const abortRef = useRef(null)
-  useEffect(() => {
-    abortRef.current = new AbortController()
-    return () => {
-      abortRef.current?.abort()
-    }
-  }, [])
 
   const goProcessAll = async (steps, extra = {}) => {
     if (!data?.path) return
@@ -100,91 +85,43 @@ export default function InstructionalDetailPage() {
 
       const paths = seasonPaths.length > 0 ? seasonPaths : [data.path]
 
-      // Lanza pipelines en secuencia — espera completed/failed antes del siguiente
-      // para evitar que WhisperX cargue en GPU múltiples veces simultáneamente.
-      //
-      // El polling NO usa el AbortController del componente: si el usuario
-      // navega fuera de la página de detalle, el bucle debe seguir lanzando
-      // seasons igualmente (los pipelines viven en el backend). Solo los
-      // fetches individuales tienen un timeout corto para no bloquearse.
-      const waitForPipeline = async (id) => {
-        const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
-        // Safety cap: ~3h máximo por season (2700 * 4s)
-        for (let iter = 0; iter < 2700; iter++) {
-          await new Promise((r) => setTimeout(r, 4000))
-          try {
-            const res = await fetch(`/api/pipeline/${id}`)
-            if (!res.ok) continue
-            const p = await res.json()
-            if (TERMINAL.has(p.status)) return p.status
-          } catch {
-            // red transitoria: reintenta
-          }
-        }
-        return 'timeout'
-      }
-
-      const orderedSteps = [...steps]
       const opts = { mode: 'oracle' }
       if (extra?.force) opts.force = true
       const continueOnFail = extra?.continueOnFail !== false
 
-      let lastId = null
-      let launched = 0
-      console.log(`[process-all] starting ${paths.length} seasons:`, paths)
-      for (let i = 0; i < paths.length; i++) {
-        console.log(`[process-all] launching season ${i + 1}/${paths.length}: ${paths[i]}`)
-        let resp
+      // Server-side batch: el orquestador vive en processor-api y sobrevive
+      // al cierre del navegador. Antes el bucle corría en JS aquí y si el
+      // usuario cerraba la pestaña entre seasons, solo la season 1 (ya
+      // lanzada al backend) terminaba y las demás nunca arrancaban.
+      const res = await fetch('/api/pipeline/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: data.name || data.path,
+          paths,
+          steps,
+          options: opts,
+          continue_on_fail: continueOnFail,
+        }),
+      })
+      if (!res.ok) {
+        let detail = ''
         try {
-          resp = await startPipeline.mutateAsync({
-            path: paths[i],
-            steps: orderedSteps,
-            options: opts,
-          })
-        } catch (err) {
-          console.error(`[process-all] season ${i + 1} start failed:`, err)
-          toast.error(`Season ${i + 1} no pudo lanzarse: ${err?.message || err}`)
-          if (!continueOnFail) break
-          continue
-        }
-        const id = resp?.pipeline_id || resp?.id
-        if (!id) {
-          console.error('[process-all] no pipeline_id in response:', resp)
-          toast.error('No se recibió pipeline_id')
-          if (!continueOnFail) break
-          continue
-        }
-        lastId = id
-        launched += 1
-        toast.info(`Season ${i + 1}/${paths.length} lanzada`)
-        if (i < paths.length - 1) {
-          console.log(`[process-all] waiting for pipeline ${id}…`)
-          const status = await waitForPipeline(id)
-          console.log(`[process-all] season ${i + 1} terminal status: ${status}`)
-          if (status === 'cancelled') {
-            toast.warning('Pipeline cancelado, deteniendo')
-            break
-          }
-          if (status === 'timeout') {
-            toast.warning(`Season ${i + 1} superó el tiempo máximo de espera, continuando`)
-          }
-          if (status === 'failed') {
-            if (continueOnFail) {
-              toast.warning(`Season ${i + 1} falló, continuando con la siguiente`)
-            } else {
-              toast.error(`Season ${i + 1} falló, deteniendo`)
-              break
-            }
-          }
-        }
+          const j = await res.json()
+          detail = j?.error || j?.detail || ''
+        } catch { /* noop */ }
+        toast.error(`No se pudo lanzar el batch: ${detail || res.status}`)
+        return
       }
-
-      console.log(`[process-all] done. launched ${launched}/${paths.length}`)
-      if (launched === paths.length && paths.length > 1) {
-        toast.success(`${paths.length} seasons completadas`)
-      }
-      // NO navegamos automáticamente — el usuario puede querer quedarse en
-      // la página del instruccional. Si quieren ver el pipeline, usan el tab.
+      const batch = await res.json()
+      try {
+        localStorage.setItem(`process_all_batch_${name}`, batch.batch_id)
+      } catch { /* noop */ }
+      toast.success(
+        paths.length > 1
+          ? `Batch lanzado: ${paths.length} seasons en cola (sigue corriendo aunque cierres el navegador)`
+          : 'Pipeline lanzado'
+      )
     } catch (err) {
       toast.error(`Error iniciando pipeline: ${err.message || 'desconocido'}`)
     } finally {

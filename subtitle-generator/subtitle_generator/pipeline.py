@@ -538,6 +538,13 @@ class SubtitlePipeline:
 
         Excluye subcarpetas de outputs (``doblajes``, ``elevenlabs``) — si no,
         WhisperX encuentra los .mkv doblados y les genera .en.srt espurios.
+
+        Strict mode (since 2026-04-29): si CUALQUIER chapter falla, se
+        lanza ``RuntimeError`` al terminar el bucle con la lista de
+        chapters fallidos. Antes los errores se loggeaban y el job
+        terminaba "completed" con sólo M/N SRTs reales en disco — el
+        siguiente paso (translate / dubbing) procesaba parcialmente y
+        el usuario no se enteraba hasta inspeccionar la Season.
         """
         _EXCLUDED_DIR_NAMES = {"doblajes", "elevenlabs"}
         video_files: list[Path] = []
@@ -554,7 +561,7 @@ class SubtitlePipeline:
         log.info("Found %d video files in %s", len(video_files), root_dir)
         processed = 0
         skipped = 0
-        errors = 0
+        failed: list[tuple[str, str]] = []  # (name, error)
 
         import torch
 
@@ -566,7 +573,7 @@ class SubtitlePipeline:
                 else:
                     processed += 1
             except Exception as e:
-                errors += 1
+                failed.append((vpath.name, str(e)))
                 log.error("Error processing %s: %s", vpath.name, e, exc_info=True)
             finally:
                 gc.collect()
@@ -575,5 +582,14 @@ class SubtitlePipeline:
 
         log.info(
             "Done. Processed: %d, Skipped (existing): %d, Errors: %d",
-            processed, skipped, errors,
+            processed, skipped, len(failed),
         )
+
+        if failed:
+            names = ", ".join(name for name, _ in failed[:5])
+            if len(failed) > 5:
+                names += " …"
+            raise RuntimeError(
+                f"Subtítulos incompletos: {processed}/{len(video_files)} OK, "
+                f"{len(failed)} fallaron: {names}"
+            )
