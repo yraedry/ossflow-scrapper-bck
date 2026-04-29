@@ -239,7 +239,8 @@ def _build_ffmpeg_argv(inp: _Inputs) -> list[str]:
                 f"-disposition:s:{s_idx}", "0",
             ]
 
-    argv.append(str(inp.output_tmp))
+    # Force matroska format — ffmpeg can't infer it from the .tmp extension.
+    argv += ["-f", "matroska", str(inp.output_tmp)]
     return argv
 
 
